@@ -1,0 +1,56 @@
+Name: Nurul Huda
+Email: nurul.huda.cyber@outlook.com
+Contact No: +65 9345 6789 • LinkedIn: linkedin.com/in/nurulhuda-sec
+Singaporean
+
+Professional Summary
+Cybersecurity Specialist with a strong focus on Security Operations (SOC), threat hunting, and cloud security. Experienced in managing enterprise-level security platforms and conducting vulnerability assessments in accordance with MAS TRM guidelines. Passionate about ethical hacking and automating security workflows.
+
+Core Technical Skills
+Security Tools: Splunk (SIEM), CrowdStrike (EDR), Palo Alto Firewalls, Tenable.io, Metasploit, Burp Suite, Wireshark
+Cloud Security: AWS Security Hub, Azure Sentinel, GCP Cloud Armor
+Scripting: Python (Automation), Bash, PowerShell
+Compliance: ISO 27001, NIST CSF, MAS CRM/TRM
+
+Work Experience
+GovTech Singapore (Cyber Security Group) – Cybersecurity Engineer
+July 2022 – Present
+- Serving in the Government Security Operation Center (G-SOC), monitoring and responding to security incidents across multiple government agencies using Splunk and CrowdStrike.
+- Developed automated incident response playbooks using SOAR (Security Orchestration, Automation, and Response) tools, reducing Mean Time to Respond (MTTR) by 35%.
+- Conducted regular purple teaming exercises to validate detection capabilities against evolving TTPs (Tactics, Techniques, and Procedures).
+- Spearheaded the vulnerability remediation program for cloud-native applications, achieving a 100% fix rate for 'High' and 'Critical' vulnerabilities within SLAs.
+
+CyberCX – Security Consultant (Vulnerability Management)
+Aug 2020 – June 2022
+- Performed internal and external penetration tests for clients in the FSI (Financial Services Industry) and Healthcare sectors.
+- Managed the Tenable.io vulnerability scanning platform for over 10,000 assets, providing remediation guidance to infrastructure teams.
+- Author of over 50 detailed security assessment reports, presenting technical risks and business impacts to C-level stakeholders.
+- Assisted clients in achieving ISO 27001 certification by conducting gap analyses and implementing security controls.
+
+Accenture – Associate Security Analyst
+July 2018 – July 2020
+- Monitored security alerts in a 24/7 SOC environment, triaging and investigating potential breaches.
+- Assisted in the deployment of firewall rules and VPN configurations for enterprise clients during the transition to remote work.
+- Conducted security awareness training and phishing simulations for over 5,000 employees.
+
+Education
+Singapore Institute of Technology (SIT)
+Bachelor of Engineering in Information and Communications Technology (Information Security)
+Aug 2014 – June 2018
+First Class Honours
+
+Personal Projects
+Open-Source Threat Intel Scraper
+- Built a Python-based tool that aggregates IOCs (Indicators of Compromise) from various public feeds (OTX, MISP, Abuse.ch) and exports them to a structured JSON format for SIEM ingestion.
+Home Lab – Active Directory Penetration Testing
+- Set up a virtualized lab environment with Windows Server 2022 and Windows 10 clients to practice advanced attack techniques like Kerberoasting, Golden Ticket attacks, and Lateral Movement.
+
+Certifications
+- Offensive Security Certified Professional (OSCP)
+- Certified Information Systems Security Professional (CISSP)
+- AWS Certified Security – Specialty
+- Microsoft Certified: Azure Security Engineer Associate (AZ-500)
+
+Languages
+- English (Native)
+- Malay (Fluent)
