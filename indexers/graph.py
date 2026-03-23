@@ -252,7 +252,7 @@ class GraphIndexer(BaseIndexer):
         num_passes: int = 1,
         similar_categories: Optional[List[str]] = None,
         guardrails: Optional[Dict] = None,
-        small_chunk_size: int = 256,
+        small_chunk_size: int = 512,
         big_chunk_size: int = 1024,
         include_free_form: bool = False,
     ) -> PropertyGraphIndex:
@@ -267,19 +267,52 @@ class GraphIndexer(BaseIndexer):
         existing_entities = self._fetch_existing_entities(category, similar_categories)
         contextual_prefix = self._add_context_to_prefix(kg_prompt_prefix, existing_entities)
 
+        # 0b. Collect per-document summaries from metadata (set by indexer.py).
+        # IMPORTANT: remove "summary" from doc.metadata BEFORE chunking.
+        # SentenceSplitter measures metadata length against chunk_size; a 300-word
+        # summary will exceed a 256-token small-chunk budget and raise ValueError.
+        # We stash the summaries in a side-dict keyed by file path and re-attach
+        # them to nodes only after chunking is complete.
+        doc_summaries: Dict[str, str] = {}
+        for doc in documents:
+            # pop() removes "summary" from doc.metadata so SentenceSplitter never
+            # measures it against chunk_size (a 300-word summary would exceed the
+            # 256–512 token small-chunk budget and raise ValueError).
+            summary = doc.metadata.pop("summary", "")
+            if summary:
+                src = doc.metadata.get("file_path") or doc.metadata.get("file_name", "")
+                if src:
+                    doc_summaries[src] = summary
+
         # 1. Small-to-Big chunking
         print(f"  -> Small-to-big parsing (small={small_chunk_size}, big={big_chunk_size})...")
         small_nodes, big_nodes = _small_to_big_parse(
-            documents, # Use documents directly, assuming they are enriched by caller
+            documents,  # Use documents directly, assuming they are enriched by caller
             small_chunk_size=small_chunk_size,
             big_chunk_size=big_chunk_size,
         )
         print(f"     {len(small_nodes)} small chunks, {len(big_nodes)} big (parent) chunks")
 
-        # 1b. Apply contextual prefix to each small node *after* chunking
-        if contextual_prefix:
-            for node in small_nodes:
-                node.set_content(f"{contextual_prefix}\n\n{node.get_content()}")
+        # 1b. Apply contextual prefix + per-document summary to each small node.
+        # Injecting the summary into every chunk ensures the extractor always has
+        # full-document context, even when the active window is only 256 tokens.
+        for node in small_nodes:
+            node_src = node.metadata.get("file_path") or node.metadata.get("file_name", "")
+            node_summary = doc_summaries.get(node_src, "")
+
+            prefix_parts: list[str] = []
+            if contextual_prefix:
+                prefix_parts.append(contextual_prefix)
+            if node_summary:
+                summary_header = (
+                    "[Document Summary – use to resolve ambiguous references]\n"
+                    + node_summary
+                )
+                prefix_parts.append(summary_header)
+
+            if prefix_parts:
+                combined_prefix = "\n\n".join(prefix_parts)
+                node.set_content(f"{combined_prefix}\n\n{node.get_content()}")
 
         # 2. Use LLM from global settings – resolve eagerly so extractors always
         #    receive a concrete instance, never None.

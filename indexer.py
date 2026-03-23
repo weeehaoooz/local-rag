@@ -20,6 +20,7 @@ from indexers import (
 # Load environment variables
 load_dotenv()
 
+
 def run_indexing(force: bool = False, clean: bool = False, num_passes: int = 1, hybrid: bool = False):
     # Setup loop stability
     try:
@@ -31,27 +32,27 @@ def run_indexing(force: bool = False, clean: bool = False, num_passes: int = 1, 
 
     # 1. Setup Local Models
     llm = Ollama(
-        model="llama3:latest", 
+        model="llama3:latest",
         base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
-        request_timeout=360.0
+        request_timeout=360.0,
     )
     embed_model = OllamaEmbedding(
         model_name="nomic-embed-text",
         base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
-        request_timeout=360.0
+        request_timeout=360.0,
     )
 
     # Configure global settings
     Settings.llm = llm
     Settings.embed_model = embed_model
-    Settings.num_workers = 1 # Keep sequential for stability with Ollama
+    Settings.num_workers = 1  # Keep sequential for stability with Ollama
 
     # 2. Setup Neo4j Connection
     graph_store = Neo4jPropertyGraphStore(
-        username=os.getenv("NEO4J_USERNAME", "neo4j"), 
-        password=os.getenv("NEO4J_PASSWORD", "password"), 
+        username=os.getenv("NEO4J_USERNAME", "neo4j"),
+        password=os.getenv("NEO4J_PASSWORD", "password"),
         url=os.getenv("NEO4J_URI", "bolt://localhost:7687"),
-        refresh_schema=False
+        refresh_schema=False,
     )
     storage_context = StorageContext.from_defaults(property_graph_store=graph_store)
 
@@ -65,7 +66,7 @@ def run_indexing(force: bool = False, clean: bool = False, num_passes: int = 1, 
     all_files = []
     for root, _, files in os.walk("./data"):
         for file in files:
-            if file.endswith(('.txt', '.pdf')):
+            if file.endswith((".txt", ".pdf")):
                 all_files.append(os.path.join(root, file))
 
     if not all_files:
@@ -79,18 +80,41 @@ def run_indexing(force: bool = False, clean: bool = False, num_passes: int = 1, 
         files_by_category[cat].append(f)
 
     # ----------------------------------------------------------------
-    # 2. Generate / load guardrails per category
+    # 2. Generate per-file summaries, then derive guardrails per category
     # ----------------------------------------------------------------
     print(f"Found {len(files_by_category)} category(ies): {', '.join(files_by_category.keys())}")
 
     for category, cat_files in files_by_category.items():
-        existing = guardrail_mgr.get_guardrails(category)
-        if existing is None:
-            print(f"  -> Generating guardrails for '{category}'...")
-            sample_docs = SimpleDirectoryReader(input_files=cat_files[:5]).load_data()
-            guardrail_mgr.generate_guardrails(category, sample_docs)
-            print(f"  -> Optimizing guardrails for '{category}'...")
-            guardrail_mgr.optimize_guardrails(category)
+        existing_guardrails = guardrail_mgr.get_guardrails(category)
+        if existing_guardrails is not None and not force:
+            # Guardrails already exist and we are not forced to regenerate.
+            # Still ensure each file has a cached summary (cheap if cached).
+            for f in cat_files[:5]:
+                docs = SimpleDirectoryReader(input_files=[f]).load_data()
+                guardrail_mgr.ensure_document_summary(f, docs, force=False)
+            continue
+
+        print(f"  -> Building guardrails for '{category}'...")
+
+        # Step 2a – generate (or load) a summary for up to 5 representative files.
+        category_summaries: list[str] = []
+        sample_files = cat_files[:5]
+        for f in sample_files:
+            docs = SimpleDirectoryReader(input_files=[f]).load_data()
+            summary = guardrail_mgr.ensure_document_summary(f, docs, force=force)
+            category_summaries.append(summary)
+            print(f"     Summarised: {os.path.basename(f)}")
+
+        # Step 2b – use summaries to generate the guardrail schema.
+        # Load raw docs as a fallback only (passed for backward-compat signature).
+        sample_docs = SimpleDirectoryReader(input_files=sample_files).load_data()
+        guardrail_mgr.generate_guardrails(
+            category,
+            sample_docs,
+            summaries=category_summaries,
+        )
+        print(f"  -> Optimizing guardrails for '{category}'...")
+        guardrail_mgr.optimize_guardrails(category)
 
     # ----------------------------------------------------------------
     # 3. Determine which files need (re-)indexing
@@ -130,30 +154,39 @@ def run_indexing(force: bool = False, clean: bool = False, num_passes: int = 1, 
     # ----------------------------------------------------------------
     if dirty_files:
         print(f"\nIndexing {len(dirty_files)} changed/new file(s) (Force: {force})...")
-        
-        # Batch files by category
+
         dirty_by_cat = defaultdict(list)
         for f in dirty_files:
             dirty_by_cat[_derive_category(f, "./data")].append(f)
 
         for category, files in dirty_by_cat.items():
             print(f"  -> Processing Category: [{category}] ({len(files)} files)")
-            
+
             similar_cats = guardrail_mgr.get_similar_categories(category)
             guardrails = guardrail_mgr.get_guardrails(category)
 
             for f in files:
                 print(f"    -> Indexing file: {f}")
                 documents = SimpleDirectoryReader(input_files=[f]).load_data()
-                
+
+                # Ensure a summary exists for this file (generate if missing).
+                # The summary is attached to doc metadata so GraphIndexer can
+                # embed it into every chunk's prompt prefix.
+                doc_summary = guardrail_mgr.ensure_document_summary(
+                    f, documents, force=force
+                )
+
+                title = _derive_title(f)
+                kg_prefix = guardrail_mgr.build_kg_prompt_prefix(
+                    category,
+                    title,
+                    document_summary=doc_summary,
+                )
 
                 for doc in documents:
-                    file_path = doc.metadata.get("file_path", f)
-                    title = _derive_title(file_path)
-                    kg_prefix = guardrail_mgr.build_kg_prompt_prefix(category, title)
-
                     doc.metadata["title"] = title
                     doc.metadata["category"] = category
+                    doc.metadata["summary"] = doc_summary
                     doc.set_content(f"Document Title: {title}\n\n{doc.get_content()}")
 
                 vector_indexer.index_documents(documents)
@@ -165,9 +198,9 @@ def run_indexing(force: bool = False, clean: bool = False, num_passes: int = 1, 
                     num_passes=num_passes,
                     similar_categories=similar_cats,
                     guardrails=guardrails,
-                    title=_derive_title(f),
+                    title=title,
                     kg_prompt_prefix=kg_prefix,
-                    include_free_form=hybrid
+                    include_free_form=hybrid,
                 )
                 tracker.update_file_hash(f)
 
@@ -176,29 +209,37 @@ def run_indexing(force: bool = False, clean: bool = False, num_passes: int = 1, 
     # ----------------------------------------------------------------
     if kg_regen_files:
         print(f"\nRe-indexing KG for {len(kg_regen_files)} file(s) due to guardrail changes/force...")
-        
+
         regen_by_cat = defaultdict(list)
         for f in kg_regen_files:
             regen_by_cat[_derive_category(f, "./data")].append(f)
 
         for category, files in regen_by_cat.items():
             print(f"  -> Processing Category: [{category}] ({len(files)} files) for KG Regen")
-            
+
             similar_cats = guardrail_mgr.get_similar_categories(category)
             guardrails = guardrail_mgr.get_guardrails(category)
 
             for f in files:
                 print(f"    -> Re-indexing KG for file: {f}")
                 documents = SimpleDirectoryReader(input_files=[f]).load_data()
-                
+
+                # Reuse cached summary; regenerate only if force=True.
+                doc_summary = guardrail_mgr.ensure_document_summary(
+                    f, documents, force=force
+                )
+
+                title = _derive_title(f)
+                kg_prefix = guardrail_mgr.build_kg_prompt_prefix(
+                    category,
+                    title,
+                    document_summary=doc_summary,
+                )
 
                 for doc in documents:
-                    file_path = doc.metadata.get("file_path", f)
-                    title = _derive_title(file_path)
-                    kg_prefix = guardrail_mgr.build_kg_prompt_prefix(category, title)
-
                     doc.metadata["title"] = title
                     doc.metadata["category"] = category
+                    doc.metadata["summary"] = doc_summary
                     doc.set_content(f"Document Title: {title}\n\n{doc.get_content()}")
 
                 graph_indexer.index_documents(
@@ -208,9 +249,9 @@ def run_indexing(force: bool = False, clean: bool = False, num_passes: int = 1, 
                     num_passes=num_passes,
                     similar_categories=similar_cats,
                     guardrails=guardrails,
-                    title=_derive_title(f),
+                    title=title,
                     kg_prompt_prefix=kg_prefix,
-                    include_free_form=hybrid
+                    include_free_form=hybrid,
                 )
 
     # ----------------------------------------------------------------
@@ -234,7 +275,6 @@ def run_indexing(force: bool = False, clean: bool = False, num_passes: int = 1, 
     print("Indexing complete.")
     graph_store.close()
 
-    # Only clear settings after everything is fully done
     Settings.llm = None
     Settings.embed_model = None
 

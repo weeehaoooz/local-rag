@@ -1,8 +1,9 @@
 # Storage
 /storage/
 
-# Generated Guardrails
+# Generated Content
 /indexers/generated_guardrails/
+/indexers/generated_summaries/
 
 # Environment
 .env

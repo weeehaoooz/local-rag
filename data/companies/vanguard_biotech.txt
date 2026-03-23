@@ -1,0 +1,35 @@
+# Company Profile: Vanguard BioTech
+
+**Name**: Vanguard BioTech
+**Industry**: Biotechnology / Life Sciences
+**Headquarters**: Boston, USA (Main Campus)
+**Operations**: R&D labs located in Biopolis, Singapore.
+**Founded**: 2015
+**Website**: www.vanguardbiotech.org
+**Mission**: "Revolutionizing genomic medicine to heal the world's rarest diseases."
+
+## Overview
+Vanguard BioTech is a clinical-stage biotechnology company pioneering next-generation genomic medicines. We leverage mRNA technology and CRISPR-Cas9 gene editing to develop therapies for rare pediatric genetic disorders that have traditionally had no known cure.
+
+## Focus Areas
+* **Rare Disease Therapeutics**: Targeted therapies for Spinal Muscular Atrophy (SMA) and Duchenne Muscular Dystrophy (DMD).
+* **mRNA Vaccines**: Developing a universal flu vaccine platform and therapeutic vaccines for certain types of oncology.
+* **Precision Diagnostics**: AI-powered genomic sequencing to identify disease markers earlier than conventional liquid biopsies.
+* **Gene Editing R&D**: Advancing next-gen CRISPR tools for more precise base editing with minimal off-target effects.
+
+## Key People
+* **Dr. Elena Rodriguez (Chief Scientific Officer)**: Renowned geneticist and Nobel laureate in Medicine for her foundational work on CRISPR-Cas9.
+* **James Montgomery (CEO)**: Serial biotech entrepreneur with a track record of driving three startups from seed stage to IPO.
+* **Prof. Kevin Zhou (Chief Data Scientist)**: Specializes in deep learning for drug discovery and structural biology.
+
+## Key Collaborations
+* **Academic**: MIT, Harvard Medical School, National University of Singapore (NUS), and Duke-NUS Medical School.
+* **Industrial**: Merck, Thermo Fisher Scientific, and A*STAR.
+
+## Recent News & Milestones
+* **Phase 2 Clinical Trials for V-Gen 1 (2024)**: Showed significant improvement in muscle regeneration and motor function in SMA patients during initial cohorts.
+* **FDA Breakthrough Therapy Designation**: Granted for its lead oncology candidate targeting HER2-positive breast cancer.
+* **Singapore Biopolis Expansion**: Doubled R&D lab space to focus on pandemic preparedness and emerging viral threats.
+
+## Values
+Scientific Excellence, Patient First, and Open Collaboration. Our "Open-Gene" initiative allows academic researchers to access our proprietary sequencing tools for non-commercial use.

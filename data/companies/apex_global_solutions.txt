@@ -1,0 +1,34 @@
+# Company Profile: Apex Global Solutions
+
+**Name**: Apex Global Solutions
+**Industry**: Enterprise Software & IT Consulting
+**Headquarters**: Singapore
+**Founded**: 2012
+**Website**: www.apexglobalsolutions.com
+**Mission**: "Empowering businesses through cutting-edge AI and cloud-native solutions."
+
+## Overview
+Apex Global Solutions is a premier IT consulting firm based in Singapore, serving clients across Southeast Asia and Europe. We specialize in digital transformation, helping legacy businesses migrate to modern cloud infrastructures while integrating advanced data analytics into their core operations.
+
+## Core Services
+* **Cloud Migration**: Seamless transition of on-premise workloads to AWS, Azure, and Google Cloud with specialized focus on high-availability architectures.
+* **AI & Machine Learning**: Custom Large Language Model (LLM) fine-tuning, predictive maintenance models, and automated customer support systems.
+* **Cybersecurity**: End-to-end security audits, threat detection, and zero-trust architecture implementation for regulated industries.
+* **Data Warehousing**: Scalable data lake solutions built on Snowflake and Databricks, enabling real-time business intelligence.
+
+## Key Clients
+* **DBS Bank**: Implemented regional real-time fraud detection systems.
+* **Singtel**: Modernized 5G infrastructure management platforms.
+* **Standard Chartered**: Migrated core retail banking systems to a hybrid cloud environment.
+* **Grab**: Optimized data ingestion pipelines for their multi-service super-app.
+
+## Key People
+* **Chen Wei Liang (Founder & CEO)**: Former Lead Architect at Google, holding a Ph.D. in Computer Science from MIT. He is a frequent speaker at regional AI summits.
+* **Sarah Jenkins (CTO)**: Expert in distributed systems and former SVP of Engineering at Salesforce. She leads the R&D division focusing on edge computing.
+
+## Recent Achievements
+* **AWS Cloud Partner of the Year (2023)**: Recognized for excellence in delivering complex multi-region migrations.
+* **FinTech Innovation Award**: Awarded for their AI-driven credit scoring engine used by regional banks.
+
+## Company Culture & Values
+"Integrity through Innovation." We foster a culture of radical transparency and continuous professional development. Our "Apex Academy" provides internal training for engineers on emerging technologies like quantum computing and decentralized finance (DeFi).
