@@ -1,0 +1,27 @@
+# Storage
+/storage/
+
+# Generated Guardrails
+/indexers/generated_guardrails/
+
+# Environment
+.env
+venv/
+ENV/
+env/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+debug.log
+
+# System
+.DS_Store
+Thumbs.db
+old_data/
+
+# Other generated content
+*.log

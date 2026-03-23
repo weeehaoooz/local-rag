@@ -1,18 +1,0 @@
-Scanning ./data for files...
-Found 1 category(ies): resumes
-
-Indexing 2 changed/new file(s) (Force: True)...
-  -> Processing Category: [resumes] (2 files)
-    -> Indexing file: ./data/resumes/si hui resume.txt
-  -> Small-to-big parsing (small=256, big=1024)...
-     9 small chunks, 2 big (parent) chunks
-  -> Extractors: RobustSchemaExtractor, ImplicitPathExtractor
-  -> PropertyGraph Extraction Pass 1/1...
-     [DEBUG] node.id_='f41687bf-4372-4777-bad9-63e45d500337' node.node_id='f41687bf-4372-4777-bad9-63e45d500337'
-Applying transformations:   0%|          | 0/2 [00:00<?, ?it/s]     [DEBUG] Extracted 42 relations from chunk
-Applying transformations:  50%|█████     | 1/2 [00:21<00:21, 21.57s/it]Applying transformations: 100%|██████████| 2/2 [00:21<00:00, 10.78s/it]
-Generating embeddings:   0%|          | 0/1 [00:00<?, ?it/s]Generating embeddings: 100%|██████████| 1/1 [00:00<00:00, 13.42it/s]
-Generating embeddings: 0it [00:00, ?it/s]Generating embeddings: 0it [00:00, ?it/s]
-     [DEBUG] upsert_relations: dropped 28 relation(s) with null source/target id
-     [DEBUG] node.id_='c2b31980-5272-4312-bf83-042bf83d1df8' node.node_id='c2b31980-5272-4312-bf83-042bf83d1df8'
-Applying transformations:   0%|          | 0/2 [00:00<?, ?it/s]
