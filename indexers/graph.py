@@ -57,13 +57,18 @@ class RobustSchemaExtractor(SchemaLLMPathExtractor):
                             subj_id = subj_name.replace(" ", "_").lower()
                             obj_id  = obj_name.replace(" ", "_").lower()
 
+                            subj_type = triplet.subject.type or "Entity"
+                            obj_type  = triplet.object.type or "Entity"
+
                             subj = EntityNode(
                                 name=subj_name,
-                                label=triplet.subject.type or "Entity",
+                                label=subj_type,
+                                properties={"entity_type": subj_type},
                             )
                             obj = EntityNode(
                                 name=obj_name,
-                                label=triplet.object.type or "Entity",
+                                label=obj_type,
+                                properties={"entity_type": obj_type},
                             )
                             rel = Relation(
                                 source_id=subj_id,
@@ -447,6 +452,12 @@ class GraphIndexer(BaseIndexer):
         print("  -> Refining Business Object properties in Neo4j...")
         self._process_properties_in_graph()
 
+        # 6. Promote entity_type → Neo4j label (enables per-type colors in Browser)
+        #    and stamp category property so every node knows its document group.
+        print("  -> Applying entity-type labels and category node...")
+        self._apply_entity_labels(category)
+        self._apply_category_node(category)
+
         return self.index
 
     # ------------------------------------------------------------------
@@ -553,8 +564,113 @@ class GraphIndexer(BaseIndexer):
         return prefix.replace("Extract the triplets now", f"{context}\nExtract the triplets now")
 
     # ------------------------------------------------------------------
-    # Persistence
+    # Neo4j label & category node post-processing
     # ------------------------------------------------------------------
+
+    def _apply_entity_labels(self, category: Optional[str]):
+        """
+        After insertion, promote each node's ``entity_type`` property into a
+        real Neo4j label.  This is what makes Neo4j Browser color nodes by type.
+
+        LlamaIndex stores everything under the generic ``__Entity__`` label;
+        this pass adds the domain label (e.g. ``Company``, ``Person``) on top
+        so the Browser's legend reflects actual entity types.
+
+        Optionally also stamps the ``category`` property (document folder) onto
+        every node that doesn't already have it.
+        """
+        if not isinstance(self.storage_context.property_graph_store, Neo4jPropertyGraphStore):
+            return
+
+        store = self.storage_context.property_graph_store
+
+        # 1. Promote entity_type → Neo4j label for every node that has it.
+        #    APOC is the cleanest way; fall back to a pure-Cypher loop when APOC
+        #    is not available.
+        apoc_query = """
+        MATCH (n)
+        WHERE n.entity_type IS NOT NULL AND n.entity_type <> ''
+        WITH n, n.entity_type AS lbl
+        CALL apoc.create.addLabels(n, [lbl]) YIELD node
+        RETURN count(node) AS promoted
+        """
+        try:
+            result = store.structured_query(apoc_query)
+            count = 0
+            if isinstance(result, list) and result:
+                r = result[0]
+                count = r.get("promoted", 0) if isinstance(r, dict) else (list(r.values())[0] if hasattr(r, "values") else 0)
+            print(f"  -> [Labels] Promoted entity_type to Neo4j label for {count} node(s) via APOC.")
+        except Exception:
+            # APOC unavailable – collect distinct types and apply with CALL-IN-TRANSACTIONS
+            print("  -> [Labels] APOC not available; using pure-Cypher label promotion...")
+            type_query = "MATCH (n) WHERE n.entity_type IS NOT NULL RETURN DISTINCT n.entity_type AS t"
+            type_results = store.structured_query(type_query)
+            entity_types = []
+            if isinstance(type_results, list):
+                for r in type_results:
+                    t = r.get("t") if isinstance(r, dict) else (list(r.values())[0] if hasattr(r, "values") else None)
+                    if t:
+                        entity_types.append(t)
+            for et in entity_types:
+                safe = et.replace("`", "")
+                q = f"MATCH (n {{entity_type: '{safe}'}}) SET n:`{safe}`"
+                try:
+                    store.structured_query(q)
+                except Exception as e:
+                    print(f"     Warning: could not apply label '{safe}': {e}")
+            print(f"  -> [Labels] Applied {len(entity_types)} entity-type label(s).")
+
+        # 2. Stamp the category property on nodes that don't have it yet.
+        if category:
+            cat_safe = category.replace("'", "''")
+            cat_q = f"""
+            MATCH (n)
+            WHERE n.entity_type IS NOT NULL AND (n.category IS NULL OR n.category = '')
+            SET n.category = '{cat_safe}'
+            """
+            try:
+                store.structured_query(cat_q)
+            except Exception as e:
+                print(f"     Warning: could not stamp category on nodes: {e}")
+
+    def _apply_category_node(self, category: Optional[str]):
+        """
+        Create (or merge) a ``(:Category {{name: '<category>'}})`` anchor node and
+        draw ``BELONGS_TO`` edges from every entity in the category to it.
+
+        This gives you a top-level overview node in the Browser and lets you
+        visually distinguish document groups with a dedicated color.
+        """
+        if not category:
+            return
+        if not isinstance(self.storage_context.property_graph_store, Neo4jPropertyGraphStore):
+            return
+
+        store = self.storage_context.property_graph_store
+        cat_safe = category.replace("'", "''")
+
+        # Ensure the Category node exists.
+        merge_cat = f"MERGE (:Category {{name: '{cat_safe}'}})"
+        try:
+            store.structured_query(merge_cat)
+        except Exception as e:
+            print(f"     Warning: could not create Category node '{category}': {e}")
+            return
+
+        # Connect all entities that belong to this category.
+        connect_q = f"""
+        MATCH (n), (c:Category {{name: '{cat_safe}'}})
+        WHERE n.category = '{cat_safe}'
+          AND NOT (n)-[:BELONGS_TO]->(c)
+          AND NOT n:Category
+        MERGE (n)-[:BELONGS_TO]->(c)
+        """
+        try:
+            store.structured_query(connect_q)
+            print(f"  -> [Category] Linked entities to Category node '{category}'.")
+        except Exception as e:
+            print(f"     Warning: could not link entities to Category '{category}': {e}")
 
     def persist(self, persist_dir: str):
         """Neo4j handles its own persistence; no local files to save."""

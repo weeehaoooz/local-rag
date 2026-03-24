@@ -34,7 +34,11 @@ def run_indexing(force: bool = False, clean: bool = False, num_passes: int = 1, 
     llm = Ollama(
         model="llama3:latest",
         base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
-        request_timeout=360.0,
+        request_timeout=720.0,
+        context_window=int(os.getenv("OLLAMA_CONTEXT_WINDOW", "8192")),
+        additional_kwargs={
+            "num_ctx": int(os.getenv("OLLAMA_CONTEXT_WINDOW", "8192")),
+        },
     )
     embed_model = OllamaEmbedding(
         model_name="nomic-embed-text",
