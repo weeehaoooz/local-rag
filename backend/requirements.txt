@@ -2,3 +2,6 @@ llama-index-llms-ollama
 llama-index-embeddings-ollama
 llama-index-graph-stores-neo4j
 python-dotenv
+fastapi
+uvicorn[standard]
+nest-asyncio

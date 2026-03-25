@@ -1,0 +1,12 @@
+<span
+  class="source-badge"
+  [class.category-resumes]="source().category === 'resumes'"
+  [class.category-companies]="source().category === 'companies'"
+  [attr.title]="source().file || source().title"
+>
+  <span class="source-icon">📄</span>
+  <span class="source-title">{{ source().title }}</span>
+  @if (source().category) {
+    <span class="source-category">{{ source().category }}</span>
+  }
+</span>

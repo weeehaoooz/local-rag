@@ -1,0 +1,14 @@
+{
+    "files": {
+        "./data/resumes/marcus lim resume.txt": "424291a2ce0bb57c3321663dcf404cb3b010dd9096eb84c7091c64bd37bd418b",
+        "./data/resumes/nurul huda resume.txt": "c112bdcecef67ec8ad711809f6b8c8616f8876411680c3637d4388f93238a65b",
+        "./data/resumes/tan mei ling resume.txt": "09fece203f10c133e4a0cb5080cae7433b672fc81592a105b758d12539c34f1b",
+        "./data/companies/vanguard_biotech.txt": "28f235c75f1ba914b4b9420e265eb5f72601204bf0a8a5f246e436f26e026a63",
+        "./data/companies/apex_global_solutions.txt": "085b3458b4ecb78ecf328a5ad731e17adc958f2231b9699cdb3af5d783349910",
+        "./data/companies/greenhorizon_energy.txt": "edf51956f52dd11db06869ed6ee105e57c158f9cd04557e23ce40ecd08dd934e"
+    },
+    "guardrail_hashes": {
+        "resumes": "85b077c5a63e7aab719b74af8f6d4a23efa2c49c3e2e67e8698768f19643825d",
+        "companies": "048dfd104f8dbf307110d3977eac9e9c0596073203bb33a79dfdf4907edf9116"
+    }
+}

@@ -1,0 +1,85 @@
+{
+  "category": "resumes",
+  "business_objects": [
+    {
+      "name": "ProductManager",
+      "description": "An entity representing a Product Manager role responsible for defining product vision and strategy.",
+      "properties": [
+        "Name",
+        "Company",
+        "Product",
+        "Industry"
+      ]
+    },
+    {
+      "name": "SoftwareEngineer",
+      "description": "An entity representing a Software Engineer role specializing in developing software applications.",
+      "properties": [
+        "Name",
+        "Company",
+        "Project",
+        "ProgrammingLanguage",
+        "Framework",
+        "Tool"
+      ]
+    },
+    {
+      "name": "CybersecuritySpecialist",
+      "description": "An entity representing a Cybersecurity Specialist role focusing on securing computer systems and networks.",
+      "properties": [
+        "Name",
+        "Company",
+        "Domain",
+        "SecurityProduct",
+        "SecurityStandard",
+        "Methodology"
+      ]
+    },
+    {
+      "name": "DataScientist",
+      "description": "An entity representing a Data Scientist role analyzing data to inform business decisions.",
+      "properties": [
+        "Name",
+        "Company",
+        "Domain",
+        "AnalyticsLibrary",
+        "CloudPlatform",
+        "VisualizationTool"
+      ]
+    },
+    {
+      "name": "FullStackDeveloper",
+      "description": "An entity representing a Full Stack Developer role responsible for developing both frontend and backend of software applications.",
+      "properties": [
+        "Name",
+        "Company",
+        "Project",
+        "FrontendTechnology",
+        "BackendTechnology"
+      ]
+    },
+    {
+      "name": "DevOpsEngineer",
+      "description": "An entity representing a DevOps Engineer role automating the build, test, and deployment of software applications.",
+      "properties": [
+        "Name",
+        "Company",
+        "Project",
+        "AutomationTool",
+        "CloudPlatform"
+      ]
+    }
+  ],
+  "relationship_types": [
+    "ISSUED_BY",
+    "WORKS_FOR",
+    "SKILLED_IN",
+    "LED_PROJECT",
+    "IMPLEMENTED_TECHNOLOGY"
+  ],
+  "conventions": {
+    "naming_convention": "UPPER_SNAKE for relationships, PascalCase for objects.",
+    "normalization_convention": "Strict normalization rules apply. Similar references will be definitively aligned (e.g., 'AngularJS' vs 'Angular' -> 'Angular', 'JS' vs 'JavaScript' -> 'JavaScript')."
+  },
+  "version": 2
+}

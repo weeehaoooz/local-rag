@@ -1,0 +1,35 @@
+<div
+  class="message-bubble"
+  [class.user]="message().role === 'user'"
+  [class.assistant]="message().role === 'assistant'"
+>
+  <div class="message-avatar">
+    @if (message().role === 'user') {
+      <span class="avatar-icon">👤</span>
+    } @else {
+      <span class="avatar-icon">🤖</span>
+    }
+  </div>
+
+  <div class="message-body">
+    <div class="message-header">
+      <span class="message-role">
+        {{ message().role === 'user' ? 'You' : 'AI Assistant' }}
+      </span>
+      <span class="message-time">{{ message().timestamp | date:'shortTime' }}</span>
+    </div>
+
+    <div class="message-content">{{ message().content }}</div>
+
+    @if (message().sources.length > 0) {
+      <div class="message-sources">
+        <span class="sources-label">Sources:</span>
+        <div class="sources-list">
+          @for (source of message().sources; track source.title) {
+            <app-source-badge [source]="source" />
+          }
+        </div>
+      </div>
+    }
+  </div>
+</div>

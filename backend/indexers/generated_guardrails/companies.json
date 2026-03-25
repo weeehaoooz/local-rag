@@ -1,0 +1,11 @@
+{
+  "category": "companies",
+  "entity_types": [
+    "Entity"
+  ],
+  "relationship_types": [
+    "RELATED_TO"
+  ],
+  "conventions": "Default fallback guardrails \u2013 LLM output could not be parsed.",
+  "version": 2
+}

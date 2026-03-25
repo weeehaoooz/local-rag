@@ -1,0 +1,62 @@
+.source-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  background: rgba(108, 92, 231, 0.15);
+  border: 1px solid rgba(108, 92, 231, 0.3);
+  color: #b8b0f0;
+  cursor: default;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+
+  &:hover {
+    background: rgba(108, 92, 231, 0.25);
+    border-color: rgba(108, 92, 231, 0.5);
+    transform: translateY(-1px);
+  }
+
+  &.category-resumes {
+    background: rgba(0, 206, 201, 0.12);
+    border-color: rgba(0, 206, 201, 0.3);
+    color: #6ee7e4;
+
+    &:hover {
+      background: rgba(0, 206, 201, 0.22);
+      border-color: rgba(0, 206, 201, 0.5);
+    }
+  }
+
+  &.category-companies {
+    background: rgba(253, 203, 110, 0.12);
+    border-color: rgba(253, 203, 110, 0.3);
+    color: #fdd889;
+
+    &:hover {
+      background: rgba(253, 203, 110, 0.22);
+      border-color: rgba(253, 203, 110, 0.5);
+    }
+  }
+
+  .source-icon {
+    font-size: 0.8rem;
+  }
+
+  .source-title {
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .source-category {
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    opacity: 0.7;
+    padding-left: 4px;
+    border-left: 1px solid rgba(255, 255, 255, 0.15);
+  }
+}

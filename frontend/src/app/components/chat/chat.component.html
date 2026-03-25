@@ -1,0 +1,83 @@
+<div class="chat-container">
+  <!-- Header -->
+  <header class="chat-header">
+    <div class="header-content">
+      <div class="header-logo">
+        <span class="logo-icon">🧠</span>
+        <div class="header-text">
+          <h1>KG-RAG Assistant</h1>
+          <span class="header-subtitle">Knowledge Graph powered local AI</span>
+        </div>
+      </div>
+      <div class="header-status">
+        <span class="status-dot"></span>
+        <span class="status-text">Connected</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Messages Area -->
+  <div class="messages-area" #messagesContainer>
+    @if (messages().length === 0) {
+      <div class="empty-state">
+        <div class="empty-icon">💬</div>
+        <h2>Start a Conversation</h2>
+        <p>Ask questions about the documents in your knowledge base. Responses will show which sources were used.</p>
+        <div class="suggestion-chips">
+          <button class="chip" (click)="userInput.set('Who is Marcus Lim?'); sendMessage()">
+            Who is Marcus Lim?
+          </button>
+          <button class="chip" (click)="userInput.set('Tell me about Apex Global Solutions'); sendMessage()">
+            Tell me about Apex Global Solutions
+          </button>
+          <button class="chip" (click)="userInput.set('What companies are in the knowledge base?'); sendMessage()">
+            What companies are in the knowledge base?
+          </button>
+        </div>
+      </div>
+    } @else {
+      @for (msg of messages(); track msg.id) {
+        <app-message-bubble [message]="msg" />
+      }
+    }
+
+    <!-- Typing Indicator -->
+    @if (isLoading()) {
+      <div class="typing-indicator">
+        <div class="typing-avatar">🤖</div>
+        <div class="typing-dots">
+          <span></span>
+          <span></span>
+          <span></span>
+        </div>
+      </div>
+    }
+  </div>
+
+  <!-- Input Area -->
+  <div class="input-area">
+    <div class="input-wrapper">
+      <textarea
+        class="message-input"
+        [(ngModel)]="userInput"
+        (keydown)="onKeyDown($event)"
+        placeholder="Ask about your documents..."
+        rows="1"
+        [disabled]="isLoading()"
+        aria-label="Chat message input"
+      ></textarea>
+      <button
+        class="send-button"
+        (click)="sendMessage()"
+        [disabled]="!userInput().trim() || isLoading()"
+        aria-label="Send message"
+      >
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="22" y1="2" x2="11" y2="13"></line>
+          <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+        </svg>
+      </button>
+    </div>
+    <p class="input-hint">Press Enter to send · Shift+Enter for new line</p>
+  </div>
+</div>
