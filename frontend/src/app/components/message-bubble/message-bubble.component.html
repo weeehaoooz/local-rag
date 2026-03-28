@@ -31,5 +31,35 @@
         </div>
       </div>
     }
+
+    @if (message().graphContext && message().graphContext!.length > 0) {
+      <details class="kg-preview">
+        <summary class="kg-preview-summary">
+          <span class="icon">🕸️</span> View Knowledge Graph Context
+        </summary>
+        <div class="kg-preview-content">
+          @for (node of message().graphContext; track node.text) {
+            <div class="kg-node">
+              <div class="kg-node-source">{{ node.source }}</div>
+              <div class="kg-node-text">{{ node.text }}</div>
+            </div>
+          }
+        </div>
+      </details>
+    }
+
+    @if (message().stats; as stats) {
+      <div class="message-stats">
+        <span class="stat-item" title="Tokens Per Second">
+          <span class="stat-icon">⚡</span>
+          {{ stats.tps }} tok/s
+        </span>
+        <span class="stat-divider">·</span>
+        <span class="stat-item" title="Context Window Utilization">
+          <span class="stat-icon">🧠</span>
+          {{ stats.context_utilization * 100 | number:'1.1-2' }}% context
+        </span>
+      </div>
+    }
   </div>
 </div>

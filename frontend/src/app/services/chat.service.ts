@@ -41,6 +41,8 @@ export class ChatService {
           content: res.response,
           sources: res.sources,
           timestamp: new Date(),
+          stats: res.stats,
+          graphContext: res.graph_context,
         };
         this.messages.update(msgs => [...msgs, assistantMessage]);
         this.isLoading.set(false);

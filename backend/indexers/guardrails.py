@@ -326,13 +326,15 @@ class GuardrailManager:
             objects_desc = f"Allowed Entity Types: {', '.join(entity_types)}\n"
 
         raw_rels = gr.get("relationship_types", [])
-        rel_names = []
+        rel_desc_block = "Allowed Relationship Types:\n"
         for r in raw_rels:
             if isinstance(r, str):
-                rel_names.append(r)
+                rel_desc_block += f"- {r}\n"
             elif isinstance(r, dict) and "name" in r:
-                rel_names.append(r["name"])
-        relationship_types = ", ".join(rel_names)
+                name = r["name"]
+                desc = r.get("description", "")
+                desc_str = f": {desc}" if desc else ""
+                rel_desc_block += f"- {name}{desc_str}\n"
 
         raw_conv = gr.get("conventions", "")
         if isinstance(raw_conv, dict):
@@ -341,23 +343,40 @@ class GuardrailManager:
         else:
             conventions = str(raw_conv)
 
+        # Few-Shot Examples for grounding
+        few_shot_examples = (
+            "--- High-Quality Triplet Examples ---\n"
+            "Text: 'Apple Inc. was founded by Steve Jobs in Cupertino.'\n"
+            "Triplets:\n"
+            "(Apple_Inc, FOUNDED_BY, Steve_Jobs)\n"
+            "(Apple_Inc, LOCATED_IN, Cupertino)\n"
+            "(Apple_Inc, HAS_PROPERTY, legal_name: Apple Inc.)\n"
+            "(Steve_Jobs, HAS_PROPERTY, common_name: Steve Jobs)\n"
+            "---\n\n"
+        )
+
         return (
             f"{header}"
             f"{summary_block}"
-            f"{objects_desc}"
-            f"Allowed Relationship Types: {relationship_types}\n"
+            f"{objects_desc}\n"
+            f"{rel_desc_block}\n"
             f"Conventions: {conventions}\n\n"
             "Strict Guidelines for High Accuracy & Normalization:\n"
             "1. STRICT NORMALIZATION & NO DUPLICATES: Always use the most canonical, universally accepted name for an entity "
             "(e.g., JavaScript instead of JS, ReactJS instead of React).\n"
             "   If a similar business object was already mentioned or is provided in the alignment context, use that EXACT name "
             "to avoid duplicates. DO NOT wrap names in literal quotes.\n"
+            "   IMPORTANT: Use lowercase_with_underscores for ALL entity names (e.g., 'apple_inc' not 'Apple Inc', "
+            "'steve_jobs' not 'Steve Jobs'). This is mandatory for graph alignment.\n"
             "2. ATOMIC TRIPLETS: Each extraction must be a single (Subject, Predicate, Object) fact.\n"
             "3. RESOLVE PRONOUNS: Replace 'he', 'it', 'they' with the specific entity names they refer to.\n"
             "4. EXTRACT PROPERTIES: For each Business Object extracted, also extract its relevant properties as additional triplets. "
             "   Format property extraction as: (EntityName, HAS_PROPERTY, PropertyName: Value).\n"
-            "5. NO SPECULATION: Extract only what is explicitly stated in the text.\n"
-            "6. CONSISTENT TYPES: Stick strictly to the allowed business objects and relationship types.\n\n"
+            "5. NO SPECULATION: Extract only what is explicitly stated in the text. If the text is vague, DO NOT extract the triplet.\n"
+            "6. CONSISTENT TYPES: Stick strictly to the allowed business objects and relationship types.\n"
+            "7. CONSISTENT NAMING: Never produce two different names for the same entity across triplets. "
+            "If you referred to an entity as 'company_x' in one triplet, always use 'company_x' in all subsequent triplets.\n\n"
+            f"{few_shot_examples}"
             "Extract the triplets now from the following text:\n\n"
         )
 

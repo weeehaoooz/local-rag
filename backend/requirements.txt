@@ -5,3 +5,11 @@ python-dotenv
 fastapi
 uvicorn[standard]
 nest-asyncio
+
+# --- Smart Chunking / Layout Analysis / Cleaning ---
+pdfplumber          # Layout-aware PDF extraction + table detection
+ftfy                # Fix broken Unicode / mojibake encoding
+spacy               # NLP for heuristic coreference resolution
+python-docx         # DOCX layout-aware loading
+beautifulsoup4      # HTML boilerplate stripping
+lxml                # Parser backend for BeautifulSoup

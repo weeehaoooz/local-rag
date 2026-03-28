@@ -1,28 +1,29 @@
-# Storage
-/storage/
+# Angular / Frontend
+/frontend/node_modules/
+/frontend/dist/
+/frontend/.angular/
+/frontend/.vscode/
 
-# Generated Content
-/indexers/generated_guardrails/
-/indexers/generated_summaries/
-
-# Environment
-.env
-venv/
-ENV/
-env/
-
-# Python
+# Python / Backend
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+*$py.class
+venv/
+env/
+ENV/
+.env
 .Python
 debug.log
+*.log
+
+# RAG Storage & Generated Data
+/backend/storage/
+/backend/indexers/generated_guardrails/
+/backend/indexers/generated_summaries/
+/backend/index_storage/
+/backend/test_data/
 
 # System
 .DS_Store
 Thumbs.db
 old_data/
-
-# Other generated content
-*.log

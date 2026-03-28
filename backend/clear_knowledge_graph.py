@@ -2,7 +2,6 @@ import os
 import sys
 from dotenv import load_dotenv
 from llama_index.graph_stores.neo4j import Neo4jGraphStore
-from pageindex import PageIndexClient, PageIndexAPIError
 from tqdm import tqdm
 import shutil
 
@@ -26,45 +25,6 @@ def clear_neo4j():
         print("Neo4j cleared successfully.")
     except Exception as e:
         print(f"Error clearing Neo4j: {e}")
-
-def clear_pageindex():
-    """Delete all documents from PageIndex."""
-    print("\n--- Clearing PageIndex Structural Index ---")
-    api_key = os.getenv("PAGEINDEX_API_KEY")
-    
-    if not api_key:
-        print("Warning: PAGEINDEX_API_KEY not found in environment or .env file.")
-        print("Skipping PageIndex clearing. Please provide an API key to clear PageIndex.")
-        return
-
-    try:
-        pi_client = PageIndexClient(api_key=api_key)
-        
-        # List all documents
-        print("Fetching document list from PageIndex...")
-        response = pi_client.list_documents(limit=100)
-        documents = response.get("documents", [])
-        total = response.get("total", 0)
-        
-        if not documents:
-            print("No documents found in PageIndex.")
-            return
-
-        print(f"Found {total} documents to delete.")
-        
-        # Delete each document
-        for doc in tqdm(documents, desc="Deleting PageIndex documents"):
-            doc_id = doc.get("id")
-            doc_name = doc.get("name", "Unknown")
-            try:
-                pi_client.delete_document(doc_id)
-                # tqdm.write(f" -> Deleted: {doc_name} ({doc_id})")
-            except PageIndexAPIError as e:
-                tqdm.write(f" -> Failed to delete {doc_name}: {e}")
-                
-        print("PageIndex cleared successfully.")
-    except Exception as e:
-        print(f"Error clearing PageIndex: {e}")
 
 def clear_local_memory():
     """Clear local indexing state and related storage."""
@@ -127,7 +87,6 @@ if __name__ == "__main__":
     confirm = input("Are you sure you want to clear your ENTIRE knowledge graph? (y/N): ")
     if confirm.lower() == 'y':
         clear_neo4j()
-        clear_pageindex()
         clear_local_memory()
         print("\nKnowledge graph and local memory clearing complete.")
     else:

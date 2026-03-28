@@ -4,12 +4,24 @@ export interface ChatSource {
   file: string;
 }
 
+export interface GraphNode {
+  text: string;
+  source: string;
+}
+
+export interface ChatStats {
+  tps: number;
+  context_utilization: number;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
   content: string;
   sources: ChatSource[];
   timestamp: Date;
+  stats?: ChatStats;
+  graphContext?: GraphNode[];
 }
 
 export interface ChatRequest {
@@ -19,4 +31,6 @@ export interface ChatRequest {
 export interface ChatResponse {
   response: string;
   sources: ChatSource[];
+  stats: ChatStats;
+  graph_context: GraphNode[];
 }

@@ -66,9 +66,21 @@ class Source(BaseModel):
     file: str = ""
 
 
+class GraphNode(BaseModel):
+    text: str
+    source: str
+
+
+class ChatStats(BaseModel):
+    tps: float = 0.0
+    context_utilization: float = 0.0
+
+
 class ChatResponse(BaseModel):
     response: str
     sources: list[Source]
+    stats: ChatStats = ChatStats()
+    graph_context: list[GraphNode] = []
 
 
 # ── Routes ────────────────────────────────────────────────────────────
@@ -88,6 +100,8 @@ def chat(req: ChatRequest):
     return ChatResponse(
         response=result["response"],
         sources=[Source(**s) for s in result["sources"]],
+        stats=ChatStats(**result.get("stats", {})),
+        graph_context=[GraphNode(text=g[0], source=g[1]) for g in result.get("graph_context", [])],
     )
 
 

@@ -90,24 +90,113 @@
 }
 
 .message-sources {
-  margin-top: 12px;
-  padding-top: 10px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border-color);
 
   .sources-label {
     display: block;
-    font-size: 0.7rem;
+    font-size: 0.75rem;
     font-weight: 600;
+    color: var(--text-muted);
+    margin-bottom: 0.5rem;
     text-transform: uppercase;
-    letter-spacing: 0.8px;
-    color: rgba(255, 255, 255, 0.35);
-    margin-bottom: 8px;
+    letter-spacing: 0.05em;
   }
 
   .sources-list {
     display: flex;
     flex-wrap: wrap;
-    gap: 6px;
+    gap: 0.5rem;
+  }
+}
+
+.message-stats {
+  margin-top: 0.75rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  opacity: 0.7;
+  transition: opacity 0.2s ease;
+
+  &:hover {
+    opacity: 1;
+  }
+
+  .stat-item {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    white-space: nowrap;
+  }
+
+  .stat-icon {
+    font-size: 0.8rem;
+  }
+
+  .stat-divider {
+    color: var(--border-color);
+  }
+}
+
+.kg-preview {
+  margin-top: 1rem;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  overflow: hidden;
+
+  .kg-preview-summary {
+    padding: 0.75rem 1rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.7);
+    cursor: pointer;
+    user-select: none;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    background: rgba(0, 0, 0, 0.1);
+    
+    &:hover {
+      background: rgba(255, 255, 255, 0.05);
+      color: rgba(255, 255, 255, 0.9);
+    }
+
+    .icon {
+      font-size: 1rem;
+    }
+  }
+
+  .kg-preview-content {
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+
+    .kg-node {
+      background: rgba(0, 0, 0, 0.15);
+      border-radius: 6px;
+      padding: 0.75rem;
+      border-left: 3px solid #6c5ce7;
+
+      .kg-node-source {
+        font-size: 0.7rem;
+        font-weight: 600;
+        color: #a362e8;
+        margin-bottom: 0.25rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+
+      .kg-node-text {
+        font-size: 0.8rem;
+        line-height: 1.4;
+        color: rgba(255, 255, 255, 0.8);
+      }
+    }
   }
 }
 

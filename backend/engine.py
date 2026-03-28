@@ -60,12 +60,10 @@ class HybridEngine:
         )
 
         # ── PropertyGraphIndex (KG retriever) ─────────────────────────
-        self.kg_index = PropertyGraphIndex(
-            nodes=[],
+        self.kg_index = PropertyGraphIndex.from_existing(
             property_graph_store=self.graph_store,
             llm=self.llm,
             embed_model=self.embed_model,
-            use_async=False,
         )
 
         # ── Vector & Summary indexes from persisted storage ───────────
@@ -122,38 +120,52 @@ class HybridEngine:
     def get_context(self, query: str) -> dict:
         """
         Retrieve context from all available indexes.
-        Returns context texts and combined source list.
+        Returns context texts (now as lists of (text, source_title) tuples) and combined source list.
         """
         all_sources = []
+        
+        # Helper to get (text, source_title) from nodes
+        def _get_context_with_sources(nodes):
+            results = []
+            for node in nodes:
+                meta = node.metadata if hasattr(node, "metadata") else {}
+                if not meta and hasattr(node, "node"):
+                    meta = getattr(node.node, "metadata", {})
+                
+                title = meta.get("title", meta.get("file_name", ""))
+                file_path = meta.get("file_path", "")
+                if not title and file_path:
+                    title = os.path.basename(file_path).rsplit(".", 1)[0]
+                
+                results.append((node.text, title))
+            return results
 
-        # 1. Knowledge Graph retrieval (KG as index)
-        graph_nodes = []
+        # 1. Knowledge Graph retrieval
+        graph_context = []
         try:
-            kg_retriever = self.kg_index.as_retriever(
-                include_text=True,
-                similarity_top_k=5,
-            )
+            kg_retriever = self.kg_index.as_retriever(include_text=True, similarity_top_k=5)
             graph_nodes = kg_retriever.retrieve(query)
+            graph_context = _get_context_with_sources(graph_nodes)
             all_sources.extend(self._extract_sources(graph_nodes))
         except Exception as e:
             print(f"  KG retrieval error: {e}")
 
-        # 2. Vector retrieval (semantic search)
-        vector_nodes = []
+        # 2. Vector retrieval
+        vector_context = []
         if self.vector_index:
             try:
-                vector_nodes = self.vector_index.as_retriever(
-                    similarity_top_k=5,
-                ).retrieve(query)
+                vector_nodes = self.vector_index.as_retriever(similarity_top_k=5).retrieve(query)
+                vector_context = _get_context_with_sources(vector_nodes)
                 all_sources.extend(self._extract_sources(vector_nodes))
             except Exception as e:
                 print(f"  Vector retrieval error: {e}")
 
         # 3. Summary retrieval
-        summary_nodes = []
+        summary_context = []
         if self.summary_index:
             try:
                 summary_nodes = self.summary_index.as_retriever().retrieve(query)
+                summary_context = _get_context_with_sources(summary_nodes)
                 all_sources.extend(self._extract_sources(summary_nodes))
             except Exception as e:
                 print(f"  Summary retrieval error: {e}")
@@ -168,9 +180,9 @@ class HybridEngine:
                 unique_sources.append(s)
 
         return {
-            "graph_context": [n.text for n in graph_nodes],
-            "vector_context": [n.text for n in vector_nodes],
-            "summary_context": [n.text for n in summary_nodes],
+            "graph_context": graph_context,
+            "vector_context": vector_context,
+            "summary_context": summary_context,
             "sources": unique_sources,
         }
 
@@ -184,41 +196,103 @@ class HybridEngine:
           1. Retrieve context from KG + vector + summary
           2. Build augmented prompt
           3. Call LLM
-          4. Return answer + sources
+          4. Parse response to extract citations
+          5. Return filtered answer + relevant sources
         """
-        context = self.get_context(user_message)
+        context_data = self.get_context(user_message)
+        sources = context_data["sources"]
 
-        # Build combined context string
+        # Build combined context string with source tag labeling
         context_parts = []
+        
+        # Helper to format context blocks with labels
+        def format_blocks(label, blocks):
+            formatted = []
+            for text, source in blocks:
+                # Add source label to each block if title is present
+                src_label = f" (Source: {source})" if source else ""
+                formatted.append(f"- {text}{src_label}")
+            return f"{label}:\n" + "\n".join(formatted) if formatted else ""
 
-        if context["graph_context"]:
-            kg_text = "\n".join(context["graph_context"][:5])
-            context_parts.append(f"KNOWLEDGE GRAPH DATA:\n{kg_text}")
+        if context_data["graph_context"]:
+            context_parts.append(format_blocks("KNOWLEDGE GRAPH DATA", context_data["graph_context"][:5]))
 
-        if context["vector_context"]:
-            vec_text = "\n".join(context["vector_context"][:5])
-            context_parts.append(f"DOCUMENT EXCERPTS:\n{vec_text}")
+        if context_data["vector_context"]:
+            context_parts.append(format_blocks("DOCUMENT EXCERPTS", context_data["vector_context"][:5]))
 
-        if context["summary_context"]:
-            sum_text = "\n".join(context["summary_context"][:3])
-            context_parts.append(f"DOCUMENT SUMMARIES:\n{sum_text}")
+        if context_data["summary_context"]:
+            context_parts.append(format_blocks("DOCUMENT SUMMARIES", context_data["summary_context"][:3]))
 
-        combined_context = "\n\n---\n\n".join(context_parts) if context_parts else "No relevant context found."
+        combined_context = "\n\n---\n\n".join(filter(None, context_parts)) if context_parts else "No relevant context found."
 
-        prompt = f"""You are a helpful AI assistant. Use the following retrieved information to answer the user's question accurately and comprehensively. Base your answer ONLY on the provided context. If the context doesn't contain enough information to answer fully, say so.
+        prompt = f"""You are a helpful AI assistant. Use the following retrieved information to answer the user's question accurately and comprehensively.
+Base your answer ONLY on the provided context. If the context doesn't contain enough information to answer fully, say so.
 
 {combined_context}
 
 USER QUESTION: {user_message}
 
-Provide a clear, well-structured answer. If information comes from multiple sources, synthesize it coherently."""
+CRITICAL INSTRUCTIONS:
+1. Provide a clear, well-structured answer.
+2. At the very end of your response, list the unique source titles you actually used to form your answer.
+3. Use the exact format: [SOURCES_USED]: SourceTitle1, SourceTitle2, ...
+4. If you cannot answer the question or didn't use any context, do not list any sources or say "[SOURCES_USED]: None".
+"""
 
         # Call LLM
-        response = self.llm.complete(prompt)
+        response_obj = self.llm.complete(prompt)
+        raw_response = str(response_obj)
+        
+        # Extract performance metrics
+        stats = {}
+        if hasattr(response_obj, "raw") and isinstance(response_obj.raw, dict):
+            raw = response_obj.raw
+            eval_count = raw.get("eval_count", 0)
+            eval_duration = raw.get("eval_duration", 0)
+            prompt_eval_count = raw.get("prompt_eval_count", 0)
+            
+            if eval_count > 0 and eval_duration > 0:
+                # Convert nanoseconds to seconds
+                tps = eval_count / (eval_duration / 1e9)
+                stats["tps"] = round(tps, 2)
+            
+            # Context utilization
+            total_tokens = prompt_eval_count + eval_count
+            context_window = getattr(self.llm, "context_window", 8192)
+            if context_window > 0:
+                utilization = total_tokens / context_window
+                stats["context_utilization"] = round(utilization, 4)
+
+        # Parse the response for citations
+        answer = raw_response
+        cited_sources = []
+        
+        marker = "[SOURCES_USED]:"
+        if marker in raw_response:
+            parts = raw_response.split(marker)
+            answer = parts[0].strip()
+            source_list_str = parts[1].strip()
+            
+            if source_list_str and source_list_str.lower() != "none":
+                # Clean up and split titles
+                titles = [t.strip() for t in source_list_str.split(",") if t.strip()]
+                cited_sources = titles
+
+        # Filter the original source list based on what the LLM cited
+        filtered_sources = []
+        lowercase_cited = [c.lower() for c in cited_sources]
+        
+        for s in sources:
+            if s["title"].lower() in lowercase_cited:
+                filtered_sources.append(s)
+            elif any(s["title"].lower() in c.lower() or c.lower() in s["title"].lower() for c in cited_sources):
+                 filtered_sources.append(s)
 
         return {
-            "response": str(response),
-            "sources": context["sources"],
+            "response": answer,
+            "sources": filtered_sources,
+            "stats": stats,
+            "graph_context": context_data.get("graph_context", []),
         }
 
     def close(self):

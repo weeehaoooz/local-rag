@@ -15,13 +15,14 @@ nest_asyncio.apply()
 from indexers import (
     VectorIndexer, SummaryIndexer, GraphIndexer, IndexingTracker,
     GuardrailManager, _derive_category, _derive_title,
+    SmartDocumentLoader, DocumentPreprocessor,
 )
 
 # Load environment variables
 load_dotenv()
 
 
-def run_indexing(force: bool = False, clean: bool = False, num_passes: int = 1, hybrid: bool = False):
+def run_indexing(force: bool = False, clean: bool = False, num_passes: int = 1, hybrid: bool = False, agentic_chunk: bool = False):
     # Setup loop stability
     try:
         loop = asyncio.get_event_loop()
@@ -62,6 +63,8 @@ def run_indexing(force: bool = False, clean: bool = False, num_passes: int = 1, 
 
     tracker = IndexingTracker("./storage/indexing_state.json")
     guardrail_mgr = GuardrailManager()
+    loader = SmartDocumentLoader()
+    preprocessor = DocumentPreprocessor()
 
     # ----------------------------------------------------------------
     # 1. Discover files & derive categories
@@ -94,7 +97,8 @@ def run_indexing(force: bool = False, clean: bool = False, num_passes: int = 1, 
             # Guardrails already exist and we are not forced to regenerate.
             # Still ensure each file has a cached summary (cheap if cached).
             for f in cat_files[:5]:
-                docs = SimpleDirectoryReader(input_files=[f]).load_data()
+                docs = loader.load(f)
+                docs = preprocessor.preprocess(docs)
                 guardrail_mgr.ensure_document_summary(f, docs, force=False)
             continue
 
@@ -104,14 +108,17 @@ def run_indexing(force: bool = False, clean: bool = False, num_passes: int = 1, 
         category_summaries: list[str] = []
         sample_files = cat_files[:5]
         for f in sample_files:
-            docs = SimpleDirectoryReader(input_files=[f]).load_data()
+            docs = loader.load(f)
+            docs = preprocessor.preprocess(docs)
             summary = guardrail_mgr.ensure_document_summary(f, docs, force=force)
             category_summaries.append(summary)
             print(f"     Summarised: {os.path.basename(f)}")
 
         # Step 2b – use summaries to generate the guardrail schema.
         # Load raw docs as a fallback only (passed for backward-compat signature).
-        sample_docs = SimpleDirectoryReader(input_files=sample_files).load_data()
+        sample_docs = loader.load(sample_files[0]) if sample_files else []
+        for f in sample_files[1:]:
+            sample_docs.extend(loader.load(f))
         guardrail_mgr.generate_guardrails(
             category,
             sample_docs,
@@ -171,7 +178,8 @@ def run_indexing(force: bool = False, clean: bool = False, num_passes: int = 1, 
 
             for f in files:
                 print(f"    -> Indexing file: {f}")
-                documents = SimpleDirectoryReader(input_files=[f]).load_data()
+                documents = loader.load(f)
+                documents = preprocessor.preprocess(documents)
 
                 # Ensure a summary exists for this file (generate if missing).
                 # The summary is attached to doc metadata so GraphIndexer can
@@ -205,6 +213,7 @@ def run_indexing(force: bool = False, clean: bool = False, num_passes: int = 1, 
                     title=title,
                     kg_prompt_prefix=kg_prefix,
                     include_free_form=hybrid,
+                    agentic_chunk=agentic_chunk,
                 )
                 tracker.update_file_hash(f)
 
@@ -226,7 +235,8 @@ def run_indexing(force: bool = False, clean: bool = False, num_passes: int = 1, 
 
             for f in files:
                 print(f"    -> Re-indexing KG for file: {f}")
-                documents = SimpleDirectoryReader(input_files=[f]).load_data()
+                documents = loader.load(f)
+                documents = preprocessor.preprocess(documents)
 
                 # Reuse cached summary; regenerate only if force=True.
                 doc_summary = guardrail_mgr.ensure_document_summary(
@@ -256,6 +266,7 @@ def run_indexing(force: bool = False, clean: bool = False, num_passes: int = 1, 
                     title=title,
                     kg_prompt_prefix=kg_prefix,
                     include_free_form=hybrid,
+                    agentic_chunk=agentic_chunk,
                 )
 
     # ----------------------------------------------------------------
@@ -289,5 +300,6 @@ if __name__ == "__main__":
     parser.add_argument("--clean", action="store_true", help="Clean up knowledge graph after indexing")
     parser.add_argument("--passes", type=int, default=1, help="Number of graph extraction passes")
     parser.add_argument("--hybrid", action="store_true", help="Enable hybrid (schema + free-form) extraction")
+    parser.add_argument("--agentic-chunk", action="store_true", help="Enable LLM-guided agentic split-point detection (slower but more semantic)")
     args = parser.parse_args()
-    run_indexing(force=args.force, clean=args.clean, num_passes=args.passes, hybrid=args.hybrid)
+    run_indexing(force=args.force, clean=args.clean, num_passes=args.passes, hybrid=args.hybrid, agentic_chunk=args.agentic_chunk)

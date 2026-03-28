@@ -1,5 +1,6 @@
 from llama_index.llms.ollama import Ollama
 import os
+import re
 import asyncio
 import difflib
 import nest_asyncio
@@ -24,66 +25,134 @@ class RobustSchemaExtractor(SchemaLLMPathExtractor):
     Calls llm.structured_predict() (sync) directly instead.
     """
 
+    def _verify_triplets(self, node_text: str, triplets: List[Any]) -> List[Any]:
+        """
+        Actor-Critic verification: asks the LLM to verify if the extracted
+        triplets are explicitly supported by the source text.
+        """
+        if not triplets:
+            return []
+
+        claims = []
+        for i, t in enumerate(triplets):
+            subj = (t.subject.name or "Unknown") if hasattr(t, "subject") else "Unknown"
+            obj = (t.object.name or "Unknown") if hasattr(t, "object") else "Unknown"
+            rel = (t.relation.type or "RELATED_TO") if hasattr(t, "relation") else "RELATED_TO"
+            claims.append(f"{i+1}. ({subj}) --[{rel}]--> ({obj})")
+
+        claims_str = "\n".join(claims)
+        
+        prompt = (
+            "You are a Fact Checker. Verify if the following Knowledge Graph triplets "
+            "are EXPLICITLY supported by the text provided below.\n\n"
+            f"--- TEXT ---\n{node_text}\n\n"
+            f"--- CLAIMS ---\n{claims_str}\n\n"
+            "Response Instructions:\n"
+            "- For each claim, respond with ONLY 'YES' or 'NO'.\n"
+            "- Use the format: '1: YES', '2: NO', etc. Ensure every claim has a response.\n"
+            "- If a claim is partially true or vague, respond with 'NO'.\n"
+            "- DO NOT provide any explanation."
+        )
+
+        try:
+            response = self.llm.complete(prompt).text.strip()
+            lines = response.split("\n")
+            valid_indices = []
+            for line in lines:
+                if ":" in line:
+                    parts = line.split(":", 1)
+                    idx_str = parts[0].strip()
+                    val = parts[1].strip().upper()
+                    if "YES" in val:
+                        try:
+                            # Strip any non-digit chars from idx_str (like '1.')
+                            clean_idx = "".join(c for c in idx_str if c.isdigit())
+                            if clean_idx:
+                                valid_indices.append(int(clean_idx) - 1)
+                        except ValueError:
+                            pass
+            
+            verified = [triplets[i] for i in valid_indices if 0 <= i < len(triplets)]
+            print(f"     [DEBUG] Actor-Critic verified {len(verified)}/{len(triplets)} triplets from chunk", flush=True)
+            return verified
+        except Exception as e:
+            print(f"     [DEBUG] Verification failed: {e}. Falling back to original extractions.", flush=True)
+            return triplets
+
     def __call__(self, nodes, show_progress=False, **kwargs):
-        from llama_index.core.graph_stores.types import KG_RELATIONS_KEY, Relation, EntityNode
+        from llama_index.core.graph_stores.types import KG_RELATIONS_KEY, KG_NODES_KEY, Relation, EntityNode
 
         result_nodes = []
         for node in nodes:
             try:
+                node_text = node.get_content(metadata_mode="llm")
                 kg_schema = self.llm.structured_predict(
                     self.kg_schema_cls,
                     self.extract_prompt,
-                    text=node.get_content(metadata_mode="llm"),
+                    text=node_text,
                 )
-                relations = []
+                
+                raw_triplets = []
                 if kg_schema and hasattr(kg_schema, "triplets"):
-                    for triplet in (kg_schema.triplets or []):
-                        try:
-                            subj_name = (triplet.subject.name or "").strip()
-                            obj_name = (triplet.object.name or "").strip()
-                            rel_type = (triplet.relation.type or "").strip()
+                    raw_triplets = kg_schema.triplets or []
+                
+                # Actor-Critic Validation Step
+                verified_triplets = self._verify_triplets(node_text, raw_triplets)
+                
+                kg_nodes_list = []
+                kg_relations_list = []
+                for triplet in verified_triplets:
+                    try:
+                        subj_name = (triplet.subject.name or "").strip()
+                        obj_name = (triplet.object.name or "").strip()
+                        rel_type = (triplet.relation.type or "").strip()
 
-                            if not subj_name or not obj_name or not rel_type:
-                                print(f"     [DEBUG] Skipping empty triplet: {triplet}", flush=True)
-                                continue
-
-                            # Use deterministic, name-based IDs that match what
-                            # EntityNode.id naturally produces: name.replace(" ", "_").lower()
-                            # This ensures:
-                            #   1. The same entity always merges to the same Neo4j node.
-                            #   2. Relation source_id/target_id reference entities by name,
-                            #      not random UUIDs, so Neo4j stores the entity name as the
-                            #      node identity instead of a UUID.
-                            subj_id = subj_name.replace(" ", "_").lower()
-                            obj_id  = obj_name.replace(" ", "_").lower()
-
-                            subj_type = triplet.subject.type or "Entity"
-                            obj_type  = triplet.object.type or "Entity"
-
-                            subj = EntityNode(
-                                name=subj_name,
-                                label=subj_type,
-                                properties={"entity_type": subj_type},
-                            )
-                            obj = EntityNode(
-                                name=obj_name,
-                                label=obj_type,
-                                properties={"entity_type": obj_type},
-                            )
-                            rel = Relation(
-                                source_id=subj_id,
-                                target_id=obj_id,
-                                label=rel_type,
-                            )
-                            relations.extend([subj, obj, rel])
-                        except Exception as e:
-                            print(f"     [DEBUG] Skipping triplet: {e}", flush=True)
+                        if not subj_name or not obj_name or not rel_type:
                             continue
-                node.metadata[KG_RELATIONS_KEY] = relations
-                print(f"     [DEBUG] Extracted {len(relations)} relations from chunk", flush=True)
+
+                        subj_id = subj_name.replace(" ", "_").lower()
+                        obj_id  = obj_name.replace(" ", "_").lower()
+
+                        subj_type = triplet.subject.type or "Entity"
+                        obj_type  = triplet.object.type or "Entity"
+
+                        # Use the normalized ID as the EntityNode name so that
+                        # Neo4j's MERGE matches it with the Relation endpoints.
+                        # The original human-readable name is stored in "title".
+                        subj = EntityNode(
+                            name=subj_id,
+                            label=subj_type,
+                            properties={
+                                "entity_type": subj_type,
+                                "title": subj_name,
+                            },
+                        )
+                        obj = EntityNode(
+                            name=obj_id,
+                            label=obj_type,
+                            properties={
+                                "entity_type": obj_type,
+                                "title": obj_name,
+                            },
+                        )
+                        rel = Relation(
+                            source_id=subj_id,
+                            target_id=obj_id,
+                            label=rel_type,
+                        )
+                        kg_nodes_list.extend([subj, obj])
+                        kg_relations_list.append(rel)
+                    except Exception as e:
+                        print(f"     [DEBUG] Skipping triplet in conversion: {e}", flush=True)
+                        continue
+                
+                node.metadata[KG_RELATIONS_KEY] = kg_relations_list
+                node.metadata[KG_NODES_KEY] = kg_nodes_list
+                print(f"     [DEBUG] Validated {len(kg_relations_list)} relations and {len(kg_nodes_list)} nodes", flush=True)
             except Exception as e:
-                print(f"     [DEBUG] Extraction failed: {e}", flush=True)
+                print(f"     [DEBUG] Extraction/Validation failed: {e}", flush=True)
                 node.metadata[KG_RELATIONS_KEY] = []
+                node.metadata[KG_NODES_KEY] = []
 
             result_nodes.append(node)
 
@@ -91,8 +160,88 @@ class RobustSchemaExtractor(SchemaLLMPathExtractor):
 
 
 # ---------------------------------------------------------------------------
-# Small-to-Big Chunking Helper
+# Chunking Helpers
 # ---------------------------------------------------------------------------
+
+# Regex that matches lines which look like section headings:
+#   - Markdown headings:          "# Title" / "## Sub-section"
+#   - ALL-CAPS lines (≥4 chars):  "INTRODUCTION", "METHODOLOGY"
+#   - Numbered section headings:  "1.2 Background", "3. Results"
+_SECTION_HEADING_RE = re.compile(
+    r"^(?:"
+    r"#{1,4}\s+.+"           # Markdown headings
+    r"|[A-Z][A-Z\s]{3,}$"   # All-caps headings (≥4 chars)
+    r"|\d+(?:\.\d+)*\.?\s+[A-Z].+"  # Numbered sections
+    r")",
+    re.MULTILINE,
+)
+
+
+def _split_by_sections(text: str) -> List[str]:
+    """
+    Split *text* at section-heading boundaries detected by ``_SECTION_HEADING_RE``.
+    Returns a list of section strings (heading included at the start of each section).
+    If no headings are found, returns ``[text]`` unchanged.
+    """
+    matches = list(_SECTION_HEADING_RE.finditer(text))
+    if not matches:
+        return [text]
+
+    sections: List[str] = []
+    prev_end = 0
+    for match in matches:
+        # Content before the first heading (preamble)
+        if match.start() > prev_end:
+            preamble = text[prev_end : match.start()].strip()
+            if preamble:
+                sections.append(preamble)
+        prev_end = match.start()
+
+    # Last section goes to the end of the text
+    sections.append(text[prev_end:].strip())
+    return [s for s in sections if s]
+
+
+def _agentic_find_split(text: str, llm, window: int = 2000) -> int:
+    """
+    Ask the LLM to identify the most semantically coherent split point within
+    a *window*-character excerpt of *text*.
+
+    The LLM returns a character offset (integer) relative to the start of the
+    window.  This is used as an "agentic" override of a fixed-size boundary.
+
+    Returns a character index into *text*.  Falls back to ``len(text) // 2``
+    if the LLM response cannot be parsed.
+
+    .. warning::
+        This makes one LLM call per invocation.  Only use when ``agentic_chunk=True``.
+    """
+    excerpt = text[:window]
+    prompt = (
+        "You are a document chunking expert. Your job is to find the BEST point to split "
+        "the following text so that each resulting chunk is self-contained and covers a single topic.\n\n"
+        f"TEXT (first {window} characters):\n"
+        "---\n"
+        f"{excerpt}\n"
+        "---\n\n"
+        "Reply with ONLY a single integer: the character index (0-based, relative to the start of the text above) "
+        "where the split should occur. Pick a point AFTER a sentence ends and BEFORE a new topic begins. "
+        "Do not include any explanation."
+    )
+    try:
+        response = llm.complete(prompt).text.strip()
+        # Extract first integer from response
+        import re as _re
+        m = _re.search(r"\d+", response)
+        if m:
+            idx = int(m.group())
+            # Clamp to valid range
+            if 0 < idx < len(text):
+                return idx
+    except Exception as exc:
+        print(f"     [agentic_chunk] LLM split-point detection failed: {exc}", flush=True)
+    return len(text) // 2
+
 
 def _small_to_big_parse(
     documents: List[Document],
@@ -100,17 +249,40 @@ def _small_to_big_parse(
     small_chunk_overlap: int = 32,
     big_chunk_size: int = 1024,
     big_chunk_overlap: int = 128,
+    agentic_chunk: bool = False,
+    llm: Optional[Any] = None,
 ) -> Tuple[List[TextNode], List[TextNode]]:
     """
-    Implements a 'small-to-big' parsing strategy:
-    - **Small nodes** (256 tokens) for precise triplet extraction with minimal noise.
-    - **Big nodes** (1024 tokens) retained as parent context for retrieval.
+    Hierarchical & Recursive Small-to-Big parsing strategy.
 
-    Each small node stores a reference to its parent big node via
-    ``node.metadata["parent_node_id"]``.
+    Steps
+    -----
+    1. **Section splitting** (recursive boundary detection)
+       Detect natural section boundaries (Markdown headings, ALL-CAPS headings,
+       numbered sections) and split there *first* — keeping all content for a
+       given topic inside the same parent chunk.
 
-    Returns (small_nodes, big_nodes).
+    2. **Agentic split (opt-in)**
+       When ``agentic_chunk=True``, each oversized section is further refined
+       by asking the LLM to choose the semantically best split point within a
+       2 000-char window.  This is expensive (1 LLM call per split) but produces
+       the most coherent chunks for highly heterogeneous content.
+
+    3. **SentenceSplitter fallback**
+       Any section that still exceeds ``big_chunk_size`` tokens is split by the
+       ``SentenceSplitter`` (sentence-boundary aware, no LLM cost).
+
+    4. **Small (child) nodes**
+       Each big (parent) node is further split into ``small_chunk_size``-token
+       child nodes for precise triplet extraction.
+
+    Returns
+    -------
+    (small_nodes, big_nodes)
     """
+    from llama_index.core import Settings as _Settings
+    _llm = llm or _Settings.llm
+
     big_splitter = SentenceSplitter(
         chunk_size=big_chunk_size,
         chunk_overlap=big_chunk_overlap,
@@ -124,12 +296,47 @@ def _small_to_big_parse(
     small_nodes: List[TextNode] = []
 
     for doc in documents:
-        # 1. Create big (parent) chunks
-        parent_chunks = big_splitter.get_nodes_from_documents([doc])
+        # ----------------------------------------------------------------
+        # 1. Recursive section splitting
+        # ----------------------------------------------------------------
+        sections = _split_by_sections(doc.get_content())
+        print(
+            f"     [chunking] '{doc.metadata.get('file_name', '?')}': "
+            f"{len(sections)} section(s) detected.",
+            flush=True,
+        )
+
+        section_docs: List[Document] = []
+        for section_text in sections:
+            # Agentic refinement for long sections
+            if agentic_chunk and _llm and len(section_text) > big_chunk_size * 4:
+                print(
+                    f"     [agentic_chunk] Running LLM split-point detection on a "
+                    f"{len(section_text)}-char section...",
+                    flush=True,
+                )
+                split_idx = _agentic_find_split(section_text, _llm)
+                left, right = section_text[:split_idx].strip(), section_text[split_idx:].strip()
+                for part in [left, right]:
+                    if part:
+                        section_docs.append(
+                            Document(text=part, metadata=doc.metadata)
+                        )
+            else:
+                section_docs.append(
+                    Document(text=section_text, metadata=doc.metadata)
+                )
+
+        # ----------------------------------------------------------------
+        # 2. SentenceSplitter for oversized sections → big (parent) nodes
+        # ----------------------------------------------------------------
+        parent_chunks = big_splitter.get_nodes_from_documents(section_docs)
         for parent in parent_chunks:
             big_nodes.append(parent)
 
-            # 2. Create small (child) chunks from each parent
+            # ----------------------------------------------------------------
+            # 3. Small (child) nodes from each parent
+            # ----------------------------------------------------------------
             child_chunks = small_splitter.get_nodes_from_documents(
                 [Document(text=parent.text, metadata=parent.metadata)]
             )
@@ -137,8 +344,8 @@ def _small_to_big_parse(
                 if not child.node_id:
                     import uuid
                     child.id_ = str(uuid.uuid4())
-                # Clear any relationship whose referenced node has a null id to prevent
-                # ImplicitPathExtractor from creating Relations with null source/target ids.
+                # Clear relationships with null node_id to prevent
+                # ImplicitPathExtractor from creating Relations with null ids.
                 for rel_type in (
                     NodeRelationship.SOURCE,
                     NodeRelationship.NEXT,
@@ -260,6 +467,7 @@ class GraphIndexer(BaseIndexer):
         small_chunk_size: int = 512,
         big_chunk_size: int = 1024,
         include_free_form: bool = False,
+        agentic_chunk: bool = False,
     ) -> PropertyGraphIndex:
         """
         Main entry point for indexing documents into a PropertyGraphIndex.
@@ -289,12 +497,15 @@ class GraphIndexer(BaseIndexer):
                 if src:
                     doc_summaries[src] = summary
 
-        # 1. Small-to-Big chunking
-        print(f"  -> Small-to-big parsing (small={small_chunk_size}, big={big_chunk_size})...")
+        # 1. Small-to-Big chunking (recursive + optional agentic)
+        mode = "agentic + recursive" if agentic_chunk else "recursive section-aware"
+        print(f"  -> Smart chunking ({mode}, small={small_chunk_size}, big={big_chunk_size})...")
         small_nodes, big_nodes = _small_to_big_parse(
-            documents,  # Use documents directly, assuming they are enriched by caller
+            documents,
             small_chunk_size=small_chunk_size,
             big_chunk_size=big_chunk_size,
+            agentic_chunk=agentic_chunk,
+            llm=Settings.llm,
         )
         print(f"     {len(small_nodes)} small chunks, {len(big_nodes)} big (parent) chunks")
 
@@ -497,19 +708,21 @@ class GraphIndexer(BaseIndexer):
             if key == "id":
                 continue
 
+            params = {"node_id": node_id, "val": value}
             if key in ["name", "title", "full_name"] and (not node_name or len(value) > len(node_name)):
-                set_query = f"""
-                MATCH (n) WHERE elementId(n) = '{node_id}' 
-                SET n.name = '{value.replace("'", "''")}', n.{key} = '{value.replace("'", "''")}'
-                """
+                # Sanitize key name for safe interpolation as property key
+                import re as _re
+                key_safe = _re.sub(r'[^a-zA-Z0-9_]', '', key)
+                set_query = f"MATCH (n) WHERE elementId(n) = $node_id SET n.name = $val, n.`{key_safe}` = $val"
             else:
-                escaped_val = value.replace("'", "''")
-                set_query = f"MATCH (n) WHERE elementId(n) = '{node_id}' SET n.{key} = '{escaped_val}'"
+                import re as _re
+                key_safe = _re.sub(r'[^a-zA-Z0-9_]', '', key)
+                set_query = f"MATCH (n) WHERE elementId(n) = $node_id SET n.`{key_safe}` = $val"
 
             try:
-                self.storage_context.property_graph_store.structured_query(set_query)
-                del_query = f"MATCH (p) WHERE elementId(p) = '{prop_node_id}' DETACH DELETE p"
-                self.storage_context.property_graph_store.structured_query(del_query)
+                self.storage_context.property_graph_store.structured_query(set_query, param_map=params)
+                del_query = f"MATCH (p) WHERE elementId(p) = $prop_node_id DETACH DELETE p"
+                self.storage_context.property_graph_store.structured_query(del_query, param_map={"prop_node_id": prop_node_id})
             except Exception as e:
                 print(f"    Warning: Failed to refine property '{key}' for node {node_id}: {e}")
 
@@ -684,7 +897,7 @@ class GraphIndexer(BaseIndexer):
     # Graph cleanup (unchanged)
     # ------------------------------------------------------------------
 
-    def clean_graph(self, similarity_threshold: float = 0.9, rel_threshold: float = None):
+    def clean_graph(self, similarity_threshold: float = 0.85, rel_threshold: float = None):
         """
         Refines the knowledge graph by merging nodes representing the same concept.
         """
@@ -692,7 +905,10 @@ class GraphIndexer(BaseIndexer):
             print("Cleanup only supported for Neo4jPropertyGraphStore.")
             return
 
-        cleaner = GraphCleaner(self.storage_context.property_graph_store)
+        cleaner = GraphCleaner(
+            self.storage_context.property_graph_store,
+            embed_model=Settings.embed_model
+        )
         cleaner.run_cleanup(similarity_threshold, rel_threshold=rel_threshold)
 
 
@@ -701,17 +917,27 @@ class GraphIndexer(BaseIndexer):
 # ===========================================================================
 
 class GraphCleaner:
-    """Handles entity resolution/merging in Neo4j."""
+    """Handles entity resolution/merging in Neo4j using semantic embeddings."""
 
-    def __init__(self, graph_store: Neo4jPropertyGraphStore):
+    def __init__(self, graph_store: Neo4jPropertyGraphStore, embed_model: Any = None):
         self.graph_store = graph_store
+        self.embed_model = embed_model or Settings.embed_model
 
-    def run_cleanup(self, similarity_threshold: float = 0.9, rel_threshold: float = None):
-        """Main entry point for graph cleaning."""
+    def _cosine_similarity(self, v1: List[float], v2: List[float]) -> float:
+        """Calculate cosine similarity between two vectors."""
+        dot = sum(a * b for a, b in zip(v1, v2))
+        norm1 = sum(a * a for a in v1) ** 0.5
+        norm2 = sum(b * b for b in v2) ** 0.5
+        if norm1 == 0 or norm2 == 0:
+            return 0
+        return dot / (norm1 * norm2)
+
+    def run_cleanup(self, similarity_threshold: float = 0.85, rel_threshold: float = None):
+        """Main entry point for graph cleaning using semantic embeddings."""
         if rel_threshold is None:
             rel_threshold = similarity_threshold
 
-        print(f"\n--- Starting Knowledge Graph Cleanup (Node Threshold: {similarity_threshold}, Rel Threshold: {rel_threshold}) ---")
+        print(f"\n--- Starting Knowledge Graph Cleanup (Semantic Threshold: {similarity_threshold}) ---")
 
         nodes = self._fetch_all_nodes()
         if not nodes:
@@ -719,6 +945,46 @@ class GraphCleaner:
             return
 
         print(f"Total nodes to analyze: {len(nodes)}")
+
+        # 0. Fast pass: merge nodes whose names are identical after case + whitespace normalisation.
+        #    This catches the most common duplicate (same title, different casing) without
+        #    needing embeddings.
+        print("  -> Running case-insensitive exact-match dedup pass...")
+        exact_clusters = self._cluster_exact_case_insensitive(nodes)
+        if exact_clusters:
+            print(f"     Found {len(exact_clusters)} exact-match cluster(s).")
+            for cluster in exact_clusters:
+                canonical = self._pick_canonical(cluster)
+                duplicates = [n for n in cluster if n["id"] != canonical["id"]]
+                dup_names = ", ".join([n["name"] for n in duplicates])
+                print(f"     Merging (exact): [{dup_names}] -> [{canonical['name']}]")
+                self._merge_nodes(canonical, duplicates)
+            # Re-fetch after merges so the semantic pass works on the clean set.
+            nodes = self._fetch_all_nodes()
+            print(f"     Nodes remaining after exact-match pass: {len(nodes)}")
+
+        if not nodes:
+            self._merge_duplicate_relationships()
+            print("--- Cleanup Complete ---\n")
+            return
+
+        # 1. Generate embeddings for all node names (batch where possible)
+        print(f"  -> Generating embeddings for {len(nodes)} unique node names...")
+        node_names = [n["name"] for n in nodes]
+        try:
+            # Simple iteration if the embed_model doesn't support batching well
+            embeddings = []
+            for i, name in enumerate(node_names):
+                if i % 50 == 0 and i > 0:
+                    print(f"     Embedded {i}/{len(nodes)}...")
+                embeddings.append(self.embed_model.get_text_embedding(name))
+            
+            for i, node in enumerate(nodes):
+                node["_embedding"] = embeddings[i]
+        except Exception as e:
+            print(f"    Warning: Embedding generation failed: {e}. Falling back to lexical matching.")
+            for n in nodes:
+                n["_embedding"] = None
 
         self._normalize_relationship_types(rel_threshold)
 
@@ -743,16 +1009,11 @@ class GraphCleaner:
         print("--- Cleanup Complete ---\n")
 
     def _fetch_all_nodes(self) -> List[Dict]:
-        """Fetch all nodes with their IDs, names, and labels.
-
-        Excludes llama-index internal infrastructure nodes (__Entity__, __Node__,
-        __Chunk__, __Community__) which have no meaningful name and are not KG
-        entities — including them causes the cleanup to see an empty result set.
-        """
+        """Fetch all nodes with their IDs, names, and labels."""
         query = """
         MATCH (n)
         WHERE (n.name IS NOT NULL OR n.id IS NOT NULL)
-          AND NOT any(lbl IN labels(n) WHERE lbl IN ['__Community__'])
+          AND NOT any(lbl IN labels(n) WHERE lbl IN ['__Community__', 'Category'])
         RETURN elementId(n) AS id, coalesce(n.name, n.id) AS name, labels(n) AS labels, properties(n) as props
         """
         result = self.graph_store.structured_query(query)
@@ -766,13 +1027,22 @@ class GraphCleaner:
                     nodes.append({"id": values[0], "name": values[1], "labels": values[2], "props": values[3]})
         return [n for n in nodes if n.get("name")]
 
+    def _cluster_exact_case_insensitive(self, nodes: List[Dict]) -> List[List[Dict]]:
+        """
+        Group nodes whose names are identical after lowering + stripping.
+        Returns only groups with 2+ members (i.e. actual duplicates).
+        """
+        from collections import defaultdict
+        buckets: Dict[str, List[Dict]] = defaultdict(list)
+        for node in nodes:
+            key = node["name"].strip().lower().replace(" ", "_")
+            buckets[key].append(node)
+        return [group for group in buckets.values() if len(group) > 1]
+
     def _cluster_similar_nodes(self, nodes: List[Dict], threshold: float) -> List[List[Dict]]:
-        """Group nodes that are string-similar after normalization."""
+        """Group nodes that are semantically similar using cosine similarity."""
         clusters = []
         visited = set()
-
-        for n in nodes:
-            n["_norm"] = n["name"].lower().strip()
 
         for i, node in enumerate(nodes):
             if node["id"] in visited:
@@ -786,7 +1056,16 @@ class GraphCleaner:
                 if other["id"] in visited:
                     continue
 
-                sim = difflib.SequenceMatcher(None, node["_norm"], other["_norm"]).ratio()
+                sim = 0.0
+                # Use embeddings if available
+                if node.get("_embedding") and other.get("_embedding"):
+                    sim = self._cosine_similarity(node["_embedding"], other["_embedding"])
+                else:
+                    # Fallback to lexical matching if embeddings failed
+                    norm1 = node["name"].lower().strip()
+                    norm2 = other["name"].lower().strip()
+                    sim = difflib.SequenceMatcher(None, norm1, norm2).ratio()
+
                 if sim >= threshold:
                     current_cluster.append(other)
                     visited.add(other["id"])
@@ -805,8 +1084,8 @@ class GraphCleaner:
         max_score = -1
 
         for node in cluster:
-            query = f"MATCH (n)-[r]-() WHERE elementId(n) = '{node['id']}' RETURN count(r) as rel_count"
-            result = self.graph_store.structured_query(query)
+            query = "MATCH (n)-[r]-() WHERE elementId(n) = $node_id RETURN count(r) as rel_count"
+            result = self.graph_store.structured_query(query, param_map={"node_id": node["id"]})
             rel_count = 0
             try:
                 if isinstance(result, list) and len(result) > 0:
@@ -838,8 +1117,8 @@ class GraphCleaner:
         for dup in duplicates:
             dup_id = dup["id"]
 
-            rel_types_query = f"MATCH (d)-[r]-() WHERE elementId(d) = '{dup_id}' RETURN DISTINCT type(r) as type"
-            types_res = self.graph_store.structured_query(rel_types_query)
+            rel_types_query = "MATCH (d)-[r]-() WHERE elementId(d) = $dup_id RETURN DISTINCT type(r) as type"
+            types_res = self.graph_store.structured_query(rel_types_query, param_map={"dup_id": dup_id})
             types = []
             if isinstance(types_res, list):
                 for record in types_res:
@@ -850,36 +1129,43 @@ class GraphCleaner:
 
             for t in types:
                 t_safe = f"`{t}`"
+                # Move outgoing relationships
                 self.graph_store.structured_query(f"""
                 MATCH (d)-[r:{t_safe}]->(target)
-                WHERE elementId(d) = '{dup_id}' AND elementId(target) <> '{canonical_id}'
-                MATCH (c) WHERE elementId(c) = '{canonical_id}'
+                WHERE elementId(d) = $dup_id AND elementId(target) <> $canonical_id
+                MATCH (c) WHERE elementId(c) = $canonical_id
                 MERGE (c)-[new_r:{t_safe}]->(target)
                 SET new_r += properties(r)
-                """)
+                """, param_map={"dup_id": dup_id, "canonical_id": canonical_id})
+                
+                # Move incoming relationships
                 self.graph_store.structured_query(f"""
                 MATCH (source)-[r:{t_safe}]->(d)
-                WHERE elementId(d) = '{dup_id}' AND elementId(source) <> '{canonical_id}'
-                MATCH (c) WHERE elementId(c) = '{canonical_id}'
+                WHERE elementId(d) = $dup_id AND elementId(source) <> $canonical_id
+                MATCH (c) WHERE elementId(c) = $canonical_id
                 MERGE (source)-[new_r:{t_safe}]->(c)
                 SET new_r += properties(r)
-                """)
+                """, param_map={"dup_id": dup_id, "canonical_id": canonical_id})
 
+            # Merge properties using parameters
             d_props = dup.get("props", {})
             set_clauses = []
+            params = {"canonical_id": canonical_id}
             for k, v in d_props.items():
                 if k not in ["id", "name"]:
-                    val_str = str(v).replace("'", "''")
-                    set_clauses.append(f"c.{k} = '{val_str}'")
+                    param_name = f"p_{k.replace(' ', '_')}"
+                    set_clauses.append(f"c.`{k}` = ${param_name}")
+                    params[param_name] = v
 
             if set_clauses:
-                set_query = f"MATCH (c) WHERE elementId(c) = '{canonical_id}' SET " + ", ".join(set_clauses)
+                set_query = f"MATCH (c) WHERE elementId(c) = $canonical_id SET " + ", ".join(set_clauses)
                 try:
-                    self.graph_store.structured_query(set_query)
+                    self.graph_store.structured_query(set_query, param_map=params)
                 except Exception as e:
                     print(f"    Warning: Failed to merge properties for {canonical_id}: {e}")
 
-            self.graph_store.structured_query(f"MATCH (d) WHERE elementId(d) = '{dup_id}' DETACH DELETE d")
+            self.graph_store.structured_query("MATCH (d) WHERE elementId(d) = $dup_id DETACH DELETE d", 
+                                             param_map={"dup_id": dup_id})
 
     def _normalize_relationship_types(self, threshold: float):
         """Standardize similar sounding relationship types globally."""
@@ -899,27 +1185,21 @@ class GraphCleaner:
 
         clusters = []
         visited = set()
-
         normalized_map = {rt: rt.upper().replace("_", " ").strip() for rt in rel_types}
-
         sorted_types = sorted(rel_types, key=len)
 
         for i, rt in enumerate(sorted_types):
             if rt in visited:
                 continue
-
             cluster = [rt]
             visited.add(rt)
-
             norm_rt = normalized_map[rt]
 
             for j in range(i + 1, len(sorted_types)):
                 other = sorted_types[j]
                 if other in visited:
                     continue
-
                 norm_other = normalized_map[other]
-
                 sim = difflib.SequenceMatcher(None, norm_rt, norm_other).ratio()
                 if sim >= threshold:
                     cluster.append(other)
@@ -953,25 +1233,21 @@ class GraphCleaner:
         MATCH (a)-[r]->(b)
         WITH a, b, type(r) as type, count(r) as count, collect(r) as rels
         WHERE count > 1
-        RETURN elementId(a) as source_id, elementId(b) as target_id, type, rels[0] as canonical_rel, rels[1..] as duplicates
+        RETURN elementId(a) as source_id, elementId(b) as target_id, type
         """
         results = self.graph_store.structured_query(find_dups_query)
         if not results:
             return
 
         for record in results:
-            canonical_rel = record.get("canonical_rel")
-            duplicates = record.get("duplicates", [])
-
             source_id = record["source_id"]
             target_id = record["target_id"]
             rel_type = record["type"]
 
-            print(f"    Merging {len(duplicates)} duplicate '{rel_type}' rels between nodes.")
-
+            print(f"    Merging duplicate '{rel_type}' rels between nodes.")
             merge_props_query = f"""
             MATCH (a)-[rs:`{rel_type}`]->(b)
-            WHERE elementId(a) = '{source_id}' AND elementId(b) = '{target_id}'
+            WHERE elementId(a) = $source_id AND elementId(b) = $target_id
             WITH rs
             ORDER BY elementId(rs) ASC
             WITH collect(rs) as rel_list
@@ -979,6 +1255,7 @@ class GraphCleaner:
             FOREACH (r IN other_rels | SET first_rel += properties(r) DELETE r)
             """
             try:
-                self.graph_store.structured_query(merge_props_query)
+                self.graph_store.structured_query(merge_props_query, 
+                                                 param_map={"source_id": source_id, "target_id": target_id})
             except Exception as e:
                 print(f"    Warning: Failed to merge duplicate rels: {e}")
