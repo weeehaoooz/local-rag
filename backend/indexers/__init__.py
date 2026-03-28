@@ -6,9 +6,10 @@ from indexers.tracker import IndexingTracker
 from indexers.guardrails import GuardrailManager, _derive_category, _derive_title
 from indexers.loader import SmartDocumentLoader
 from indexers.preprocessor import DocumentPreprocessor
+from indexers.community import CommunitySummarizer
 
 __all__ = [
     "BaseIndexer", "VectorIndexer", "SummaryIndexer", "GraphIndexer",
     "IndexingTracker", "GuardrailManager", "_derive_category", "_derive_title",
-    "SmartDocumentLoader", "DocumentPreprocessor",
+    "SmartDocumentLoader", "DocumentPreprocessor", "CommunitySummarizer",
 ]

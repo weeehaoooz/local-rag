@@ -16,6 +16,16 @@ from llama_index.embeddings.ollama import OllamaEmbedding
 # Load environment variables
 load_dotenv()
 
+# ---------------------------------------------------------------------------
+# Query routing keywords — used to detect global/thematic queries
+# ---------------------------------------------------------------------------
+_GLOBAL_QUERY_KEYWORDS = [
+    "main theme", "overall", "summarize", "summary", "overview",
+    "big picture", "across all", "general", "common pattern",
+    "recurring", "high level", "key takeaway", "in general",
+    "holistic", "what are the themes", "across documents",
+]
+
 
 class HybridEngine:
     """
@@ -23,6 +33,7 @@ class HybridEngine:
       1. PropertyGraphIndex (Neo4j KG as retrieval index)
       2. VectorStoreIndex (semantic search)
       3. SummaryIndex (structural/overview retrieval)
+      4. CommunityRetriever (GraphRAG-style global/thematic retrieval)
 
     Each retrieval path returns source metadata so the caller
     can attribute answers to original documents.
@@ -66,6 +77,20 @@ class HybridEngine:
             embed_model=self.embed_model,
         )
 
+        # ── Community Retriever (GraphRAG) ────────────────────────────
+        try:
+            from indexers.community import CommunitySummarizer
+            self.community_summarizer = CommunitySummarizer(self.graph_store, llm=self.llm)
+            # Quick check: are there any community summaries?
+            test = self.community_summarizer.get_all_summaries()
+            if test:
+                print(f"  ✓ Community index loaded ({len(test)} communities)")
+            else:
+                print("  ⓘ No community summaries found (run: python scripts/detect_communities.py --summarize)")
+        except Exception as e:
+            print(f"  ✗ Community retriever not available: {e}")
+            self.community_summarizer = None
+
         # ── Vector & Summary indexes from persisted storage ───────────
         print("Loading indexes from ./storage...")
         try:
@@ -85,6 +110,19 @@ class HybridEngine:
             self.summary_index = None
 
         print("HybridEngine ready.")
+
+    # ──────────────────────────────────────────────────────────────────
+    # Query Routing
+    # ──────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _is_global_query(query: str) -> bool:
+        """
+        Heuristic to detect whether a query is global/thematic (suited for
+        community-level retrieval) vs. local/factual (suited for KG + vector).
+        """
+        q_lower = query.lower()
+        return any(kw in q_lower for kw in _GLOBAL_QUERY_KEYWORDS)
 
     # ──────────────────────────────────────────────────────────────────
     # Retrieval
@@ -123,6 +161,7 @@ class HybridEngine:
         Returns context texts (now as lists of (text, source_title) tuples) and combined source list.
         """
         all_sources = []
+        is_global = self._is_global_query(query)
         
         # Helper to get (text, source_title) from nodes
         def _get_context_with_sources(nodes):
@@ -170,6 +209,25 @@ class HybridEngine:
             except Exception as e:
                 print(f"  Summary retrieval error: {e}")
 
+        # 4. Community retrieval (GraphRAG global search)
+        community_context = []
+        if self.community_summarizer:
+            try:
+                # For global queries, fetch more communities; for local, fewer
+                top_k = 5 if is_global else 2
+                relevant_communities = self.community_summarizer.get_relevant_summaries(
+                    query, top_k=top_k
+                )
+                for comm in relevant_communities:
+                    summary = comm.get("summary", "")
+                    key_entities = comm.get("key_entities", "")
+                    cid = comm.get("community_id", "?")
+                    if summary:
+                        label = f"Community {cid} ({key_entities})"
+                        community_context.append((summary, label))
+            except Exception as e:
+                print(f"  Community retrieval error: {e}")
+
         # Deduplicate sources
         seen = set()
         unique_sources = []
@@ -183,7 +241,9 @@ class HybridEngine:
             "graph_context": graph_context,
             "vector_context": vector_context,
             "summary_context": summary_context,
+            "community_context": community_context,
             "sources": unique_sources,
+            "is_global": is_global,
         }
 
     # ──────────────────────────────────────────────────────────────────
@@ -193,14 +253,15 @@ class HybridEngine:
     def chat(self, user_message: str) -> dict:
         """
         End-to-end RAG chat:
-          1. Retrieve context from KG + vector + summary
-          2. Build augmented prompt
+          1. Retrieve context from KG + vector + summary + communities
+          2. Build augmented prompt (route: local vs global)
           3. Call LLM
           4. Parse response to extract citations
           5. Return filtered answer + relevant sources
         """
         context_data = self.get_context(user_message)
         sources = context_data["sources"]
+        is_global = context_data.get("is_global", False)
 
         # Build combined context string with source tag labeling
         context_parts = []
@@ -214,6 +275,13 @@ class HybridEngine:
                 formatted.append(f"- {text}{src_label}")
             return f"{label}:\n" + "\n".join(formatted) if formatted else ""
 
+        # For global queries, prioritize community context
+        if is_global and context_data["community_context"]:
+            context_parts.append(format_blocks(
+                "THEMATIC COMMUNITY SUMMARIES (use these for big-picture analysis)",
+                context_data["community_context"]
+            ))
+
         if context_data["graph_context"]:
             context_parts.append(format_blocks("KNOWLEDGE GRAPH DATA", context_data["graph_context"][:5]))
 
@@ -222,6 +290,13 @@ class HybridEngine:
 
         if context_data["summary_context"]:
             context_parts.append(format_blocks("DOCUMENT SUMMARIES", context_data["summary_context"][:3]))
+
+        # For non-global queries, append community context at the end (supplementary)
+        if not is_global and context_data["community_context"]:
+            context_parts.append(format_blocks(
+                "THEMATIC CONTEXT (supplementary)",
+                context_data["community_context"][:2]
+            ))
 
         combined_context = "\n\n---\n\n".join(filter(None, context_parts)) if context_parts else "No relevant context found."
 
@@ -303,3 +378,4 @@ CRITICAL INSTRUCTIONS:
             pass
         Settings.llm = None
         Settings.embed_model = None
+

@@ -4,6 +4,7 @@ import re
 import asyncio
 import difflib
 import nest_asyncio
+import numpy as np
 from typing import List, Any, Optional, Dict, Tuple
 
 from llama_index.core import PropertyGraphIndex, StorageContext, Settings
@@ -476,10 +477,6 @@ class GraphIndexer(BaseIndexer):
         if not documents:
             return self.index
 
-        # 0. Contextual alignment – existing entity names
-        existing_entities = self._fetch_existing_entities(category, similar_categories)
-        contextual_prefix = self._add_context_to_prefix(kg_prompt_prefix, existing_entities)
-
         # 0b. Collect per-document summaries from metadata (set by indexer.py).
         # IMPORTANT: remove "summary" from doc.metadata BEFORE chunking.
         # SentenceSplitter measures metadata length against chunk_size; a 300-word
@@ -496,6 +493,15 @@ class GraphIndexer(BaseIndexer):
                 src = doc.metadata.get("file_path") or doc.metadata.get("file_name", "")
                 if src:
                     doc_summaries[src] = summary
+
+        # 0. Context-aware entity alignment — use the document summary to rank
+        #    existing graph entities by relevance, injecting only the top-K.
+        first_summary = next(iter(doc_summaries.values()), None)
+        existing_entities = self._fetch_existing_entities(
+            category, similar_categories,
+            document_summary=first_summary,
+        )
+        contextual_prefix = self._add_context_to_prefix(kg_prompt_prefix, existing_entities)
 
         # 1. Small-to-Big chunking (recursive + optional agentic)
         mode = "agentic + recursive" if agentic_chunk else "recursive section-aware"
@@ -586,70 +592,71 @@ class GraphIndexer(BaseIndexer):
                 return _original_upsert_relations(valid)
         self.index.property_graph_store.upsert_relations = _safe_upsert_relations
 
-        # 5. Insertion passes
-        # SchemaLLMPathExtractor relies on anyio/sniffio to detect the async backend.
-        # sniffio checks a context variable that is ONLY set when running inside an
-        # anyio-managed task. asyncio.run / loop.run_until_complete don't set it,
-        # causing "unknown async library". Fix: use anyio.run(..., backend="asyncio")
-        # which correctly sets the sniffio context. nest_asyncio.apply() lets
-        # anyio.run work even when an event loop is already running (e.g. Jupyter).
+        # 5. Insertion passes — batched & semaphore-controlled
+        # Nodes are inserted in configurable batches to reduce LLM round-trip
+        # overhead. A semaphore limits concurrent Neo4j writes.
         import anyio
         import asyncio
         nest_asyncio.apply()
         index_ref = self.index
+        BATCH_SIZE = 4  # nodes per insert batch (tune based on VRAM / context)
+        MAX_CONCURRENT = 2  # max parallel batch inserts
 
-        async def _insert_pass():
-            failed = 0
-            for node in small_nodes:
-                print(f"     [DEBUG] node.id_={repr(node.id_)} node.node_id={repr(node.node_id)}", flush=True)
-                try:
-                    # Ensure node has a valid id before inserting
-                    if not node.node_id:
-                        import uuid
-                        node.id_ = str(uuid.uuid4())
+        def _sanitize_node(node):
+            """Ensure a node has a valid id and clean relation metadata."""
+            import uuid as _uuid
+            from llama_index.core.graph_stores.types import KG_RELATIONS_KEY, KG_NODES_KEY
+            if not node.node_id:
+                node.id_ = str(_uuid.uuid4())
+            raw_rels = node.metadata.get(KG_RELATIONS_KEY, [])
+            clean_rels = []
+            for r in raw_rels:
+                src = getattr(r, "source_id", None)
+                tgt = getattr(r, "target_id", None)
+                nid = getattr(r, "id", None)
+                if src is not None and tgt is not None:
+                    clean_rels.append(r)
+                elif src is None and tgt is None and nid is not None:
+                    clean_rels.append(r)
+            node.metadata[KG_RELATIONS_KEY] = clean_rels
+            return node
 
-                    # Filter out any relations with null source/target before insertion
-                    # so ImplicitPathExtractor results don't slip through as null ids.
-                    from llama_index.core.graph_stores.types import KG_RELATIONS_KEY, KG_NODES_KEY
-                    raw_rels = node.metadata.get(KG_RELATIONS_KEY, [])
-                    clean_rels = []
-                    for r in raw_rels:
-                        src = getattr(r, "source_id", None)
-                        tgt = getattr(r, "target_id", None)
-                        nid = getattr(r, "id", None)
-                        # Relation objects need both src+tgt; EntityNode objects need id
-                        if src is not None and tgt is not None:
-                            clean_rels.append(r)
-                        elif src is None and tgt is None and nid is not None:
-                            clean_rels.append(r)
-                    if len(clean_rels) < len(raw_rels):
-                        print(f"     [DEBUG] Dropped {len(raw_rels) - len(clean_rels)} null-id relation(s) from KG_RELATIONS_KEY", flush=True)
-                    node.metadata[KG_RELATIONS_KEY] = clean_rels
+        async def _insert_batch(batch, sem, pass_num):
+            """Insert a batch of nodes under a concurrency semaphore."""
+            async with sem:
+                failed = 0
+                for node in batch:
+                    node = _sanitize_node(node)
+                    try:
+                        index_ref.insert_nodes([node])
+                    except Exception as exc:
+                        if "ConstraintValidationFailed" in str(exc):
+                            pass
+                        else:
+                            failed += 1
+                            print(f"     [Pass {pass_num}] Insert failed: {exc}", flush=True)
+                return failed
 
-                    # Print every relation object to find the null id
-                    for rel in node.metadata.get(KG_RELATIONS_KEY, []):
-                        print(f"     [DEBUG] REL source_id={repr(getattr(rel, 'source_id', 'N/A'))} target_id={repr(getattr(rel, 'target_id', 'N/A'))} label={repr(getattr(rel, 'label', 'N/A'))} id={repr(getattr(rel, 'id', 'N/A'))}", flush=True)
-                    for n in node.metadata.get(KG_NODES_KEY, []):
-                        print(f"     [DEBUG] NODE id={repr(getattr(n, 'id', 'N/A'))} name={repr(getattr(n, 'name', 'N/A'))}", flush=True)
-
-                    index_ref.insert_nodes([node])
-                except Exception as exc:
-                    if "ConstraintValidationFailed" in str(exc):
-                        pass
-                    else:
-                        failed += 1
-                        print(f"     [DEBUG] Insert failed: {exc}", flush=True)
-                        import traceback
-                        print(traceback.format_exc(), flush=True)
-            if failed:
-                print(f"     ({failed} chunk(s) failed during insert)")
-                
+        async def _insert_pass(pass_num):
+            sem = asyncio.Semaphore(MAX_CONCURRENT)
+            batches = [
+                small_nodes[i : i + BATCH_SIZE]
+                for i in range(0, len(small_nodes), BATCH_SIZE)
+            ]
+            tasks = [_insert_batch(b, sem, pass_num) for b in batches]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            total_failed = sum(r for r in results if isinstance(r, int))
+            exceptions = [r for r in results if isinstance(r, Exception)]
+            if total_failed:
+                print(f"     ({total_failed} chunk(s) failed during pass {pass_num})")
+            if exceptions:
+                print(f"     ({len(exceptions)} batch(es) raised exceptions during pass {pass_num})")
 
         for i in range(num_passes):
-            print(f"  -> PropertyGraph Extraction Pass {i + 1}/{num_passes}...")
+            print(f"  -> PropertyGraph Extraction Pass {i + 1}/{num_passes} ({len(small_nodes)} nodes, batch={BATCH_SIZE})...")
             try:
                 loop = asyncio.get_event_loop()
-                loop.run_until_complete(_insert_pass())
+                loop.run_until_complete(_insert_pass(i + 1))
             except Exception as e:
                 err_str = str(e)
                 if "ConstraintValidationFailed" in err_str:
@@ -734,47 +741,121 @@ class GraphIndexer(BaseIndexer):
         self,
         category: Optional[str],
         similar_categories: Optional[List[str]] = None,
+        document_summary: Optional[str] = None,
+        top_k: int = 20,
     ) -> List[str]:
-        """Fetch names of existing entities in this category or similar categories/graph."""
+        """
+        Fetch semantically relevant existing entities from the graph.
+
+        Instead of returning 150 random entities, this:
+        1. Fetches all entity names + types from Neo4j.
+        2. Embeds the current document's summary.
+        3. Embeds all entity names.
+        4. Returns only the top-K entities most similar to the document summary.
+
+        This prevents polluting the extraction prompt with unrelated entities
+        (e.g. finance entities when indexing a healthcare document).
+        """
         cache_key = f"{category or 'global'}_{'_'.join(sorted(similar_categories or []))}"
-        if cache_key in self._entity_cache:
+        # Only use cache when there is no document_summary to rank against
+        if document_summary is None and cache_key in self._entity_cache:
             return self._entity_cache[cache_key]
 
         if not isinstance(self.storage_context.property_graph_store, Neo4jPropertyGraphStore):
             return []
 
         query = """
-        MATCH (n) 
-        WHERE (n.name IS NOT NULL OR n.id IS NOT NULL) 
-        RETURN DISTINCT coalesce(n.name, n.id) as name, labels(n)[0] as type 
-        LIMIT 150
+        MATCH (n)
+        WHERE (n.name IS NOT NULL OR n.id IS NOT NULL)
+          AND NOT any(lbl IN labels(n) WHERE lbl IN ['__Community__', 'Category', 'CommunitySummary'])
+        RETURN DISTINCT coalesce(n.name, n.id) as name,
+               coalesce(n.title, n.name, n.id) as title,
+               labels(n)[0] as type
         """
         results = self.storage_context.property_graph_store.structured_query(query)
-        entities = []
+        raw_entities: List[Dict[str, str]] = []
         if isinstance(results, list):
             for r in results:
                 if isinstance(r, dict):
-                    entities.append(f"{r['name']} ({r.get('type', 'Entity')})")
+                    raw_entities.append({
+                        "name": r.get("name", ""),
+                        "title": r.get("title", r.get("name", "")),
+                        "type": r.get("type", "Entity"),
+                    })
                 elif hasattr(r, "values"):
                     vals = list(r.values())
-                    type_str = vals[1] if len(vals) > 1 and vals[1] else "Entity"
-                    entities.append(f"{vals[0]} ({type_str})")
+                    raw_entities.append({
+                        "name": vals[0] if len(vals) > 0 else "",
+                        "title": vals[1] if len(vals) > 1 else (vals[0] if vals else ""),
+                        "type": vals[2] if len(vals) > 2 and vals[2] else "Entity",
+                    })
 
-        processed_entities = [e for e in entities if e]
-        self._entity_cache[cache_key] = processed_entities
-        return processed_entities
+        raw_entities = [e for e in raw_entities if e["name"]]
+        if not raw_entities:
+            return []
 
-    def _add_context_to_prefix(self, prefix: Optional[str], entities: List[str]) -> Optional[str]:
-        """Inject existing entities into the prompt prefix for alignment."""
+        # ── Semantic ranking (when summary is available) ──────────────
+        if document_summary and Settings.embed_model is not None and len(raw_entities) > top_k:
+            try:
+                summary_emb = np.array(
+                    Settings.embed_model.get_text_embedding(document_summary)
+                )
+                entity_labels = [
+                    f"{e['title']} ({e['type']})" for e in raw_entities
+                ]
+                entity_embs = np.array([
+                    Settings.embed_model.get_text_embedding(label)
+                    for label in entity_labels
+                ])
+                # Cosine similarity: dot(a, B^T) / (|a| * |B|)
+                norms = np.linalg.norm(entity_embs, axis=1)
+                norms[norms == 0] = 1e-10
+                summary_norm = np.linalg.norm(summary_emb)
+                if summary_norm == 0:
+                    summary_norm = 1e-10
+                similarities = entity_embs @ summary_emb / (norms * summary_norm)
+                top_indices = np.argsort(similarities)[-top_k:][::-1]
+
+                ranked = [
+                    f"{raw_entities[i]['title']} ({raw_entities[i]['type']})"
+                    for i in top_indices
+                ]
+                print(
+                    f"     [entity-injection] Ranked {len(raw_entities)} entities → top {len(ranked)} by relevance",
+                    flush=True,
+                )
+                self._entity_cache[cache_key] = ranked
+                return ranked
+            except Exception as exc:
+                print(
+                    f"     [entity-injection] Semantic ranking failed ({exc}); falling back to unranked",
+                    flush=True,
+                )
+
+        # ── Fallback: return all (capped) ─────────────────────────────
+        fallback = [
+            f"{e['title']} ({e['type']})" for e in raw_entities
+        ][:top_k]
+        self._entity_cache[cache_key] = fallback
+        return fallback
+
+    def _add_context_to_prefix(
+        self, prefix: Optional[str], entities: List[str]
+    ) -> Optional[str]:
+        """Inject semantically-ranked existing entities into the prompt prefix."""
         if not prefix or not entities:
             return prefix
 
         context = (
-            "Recently Extracted Entities (Use exactly these names if referring to the same concept!): "
-            + ", ".join(entities[:20])
+            "IMPORTANT — Previously Extracted Entities (Reuse these EXACT names "
+            "if referring to the same concept to avoid duplicates!):\n"
+            + "\n".join(f"  • {e}" for e in entities)
             + "\n"
         )
-        return prefix.replace("Extract the triplets now", f"{context}\nExtract the triplets now")
+        return prefix.replace(
+            "Extract the triplets now",
+            f"{context}\nExtract the triplets now",
+        )
 
     # ------------------------------------------------------------------
     # Neo4j label & category node post-processing
@@ -925,12 +1006,11 @@ class GraphCleaner:
 
     def _cosine_similarity(self, v1: List[float], v2: List[float]) -> float:
         """Calculate cosine similarity between two vectors."""
-        dot = sum(a * b for a, b in zip(v1, v2))
-        norm1 = sum(a * a for a in v1) ** 0.5
-        norm2 = sum(b * b for b in v2) ** 0.5
-        if norm1 == 0 or norm2 == 0:
-            return 0
-        return dot / (norm1 * norm2)
+        a, b = np.asarray(v1), np.asarray(v2)
+        na, nb = np.linalg.norm(a), np.linalg.norm(b)
+        if na == 0 or nb == 0:
+            return 0.0
+        return float(np.dot(a, b) / (na * nb))
 
     def run_cleanup(self, similarity_threshold: float = 0.85, rel_threshold: float = None):
         """Main entry point for graph cleaning using semantic embeddings."""
@@ -1013,7 +1093,7 @@ class GraphCleaner:
         query = """
         MATCH (n)
         WHERE (n.name IS NOT NULL OR n.id IS NOT NULL)
-          AND NOT any(lbl IN labels(n) WHERE lbl IN ['__Community__', 'Category'])
+          AND NOT any(lbl IN labels(n) WHERE lbl IN ['__Community__', 'Category', 'CommunitySummary'])
         RETURN elementId(n) AS id, coalesce(n.name, n.id) AS name, labels(n) AS labels, properties(n) as props
         """
         result = self.graph_store.structured_query(query)
@@ -1040,40 +1120,92 @@ class GraphCleaner:
         return [group for group in buckets.values() if len(group) > 1]
 
     def _cluster_similar_nodes(self, nodes: List[Dict], threshold: float) -> List[List[Dict]]:
-        """Group nodes that are semantically similar using cosine similarity."""
-        clusters = []
-        visited = set()
+        """
+        Group nodes that are semantically similar using cosine similarity.
 
-        for i, node in enumerate(nodes):
-            if node["id"] in visited:
+        Optimisations over the naive O(N²) approach:
+        1. **Label Blocking** — only compare nodes that share at least one
+           Neo4j label.  This drastically reduces comparisons when the graph
+           contains many entity types (e.g. Person, Company, Technology).
+        2. **Vectorised similarity** — when embeddings are available, stack
+           them into a NumPy matrix and compute the full cosine similarity
+           matrix in one shot (BLAS-accelerated).
+        """
+        from collections import defaultdict
+
+        # ── Step 1: Group by label (blocking key) ──────────────────────
+        label_buckets: Dict[str, List[int]] = defaultdict(list)
+        for idx, node in enumerate(nodes):
+            labels = node.get("labels", [])
+            # Filter out generic LlamaIndex labels
+            meaningful = [l for l in labels if l not in ("__Entity__", "__Node__")]
+            if meaningful:
+                for lbl in meaningful:
+                    label_buckets[lbl].append(idx)
+            else:
+                # Nodes without meaningful labels go into a catch-all bucket
+                label_buckets["__UNLABELED__"].append(idx)
+
+        all_clusters: List[List[Dict]] = []
+        globally_visited: set = set()
+
+        for label, indices in label_buckets.items():
+            bucket_nodes = [nodes[i] for i in indices]
+            if len(bucket_nodes) < 2:
                 continue
 
-            current_cluster = [node]
-            visited.add(node["id"])
+            # ── Step 2: Vectorised cosine similarity (per-block) ───────
+            has_embeddings = all(n.get("_embedding") is not None for n in bucket_nodes)
 
-            for j in range(i + 1, len(nodes)):
-                other = nodes[j]
-                if other["id"] in visited:
-                    continue
+            if has_embeddings:
+                emb_matrix = np.array([n["_embedding"] for n in bucket_nodes])
+                norms = np.linalg.norm(emb_matrix, axis=1, keepdims=True)
+                norms[norms == 0] = 1e-10
+                normed = emb_matrix / norms
+                sim_matrix = normed @ normed.T
 
-                sim = 0.0
-                # Use embeddings if available
-                if node.get("_embedding") and other.get("_embedding"):
-                    sim = self._cosine_similarity(node["_embedding"], other["_embedding"])
-                else:
-                    # Fallback to lexical matching if embeddings failed
+                visited: set = set()
+                for i in range(len(bucket_nodes)):
+                    nid = bucket_nodes[i]["id"]
+                    if nid in visited or nid in globally_visited:
+                        continue
+                    cluster = [bucket_nodes[i]]
+                    visited.add(nid)
+                    for j in range(i + 1, len(bucket_nodes)):
+                        other_id = bucket_nodes[j]["id"]
+                        if other_id in visited or other_id in globally_visited:
+                            continue
+                        if sim_matrix[i, j] >= threshold:
+                            cluster.append(bucket_nodes[j])
+                            visited.add(other_id)
+                    if len(cluster) > 1:
+                        all_clusters.append(cluster)
+                        for n in cluster:
+                            globally_visited.add(n["id"])
+            else:
+                # Fallback: lexical matching within the block
+                visited = set()
+                for i, node in enumerate(bucket_nodes):
+                    if node["id"] in visited or node["id"] in globally_visited:
+                        continue
+                    cluster = [node]
+                    visited.add(node["id"])
                     norm1 = node["name"].lower().strip()
-                    norm2 = other["name"].lower().strip()
-                    sim = difflib.SequenceMatcher(None, norm1, norm2).ratio()
+                    for j in range(i + 1, len(bucket_nodes)):
+                        other = bucket_nodes[j]
+                        if other["id"] in visited or other["id"] in globally_visited:
+                            continue
+                        norm2 = other["name"].lower().strip()
+                        sim = difflib.SequenceMatcher(None, norm1, norm2).ratio()
+                        if sim >= threshold:
+                            cluster.append(other)
+                            visited.add(other["id"])
+                    if len(cluster) > 1:
+                        all_clusters.append(cluster)
+                        for n in cluster:
+                            globally_visited.add(n["id"])
 
-                if sim >= threshold:
-                    current_cluster.append(other)
-                    visited.add(other["id"])
-
-            if len(current_cluster) > 1:
-                clusters.append(current_cluster)
-
-        return clusters
+        return all_clusters
 
     def _pick_canonical(self, cluster: List[Dict]) -> Dict:
         """
