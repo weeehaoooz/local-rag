@@ -35,6 +35,27 @@ def clear_local_memory():
     vector_path = os.path.join(storage_path, "vector")
     summary_path = os.path.join(storage_path, "summary")
     guardrails_path = "./indexers/generated_guardrails"
+    doc_summaries_path = "./indexers/generated_summaries"
+
+    # Helper function to clear directory contents
+    def clear_dir_contents(path, label):
+        if os.path.exists(path):
+            try:
+                print(f"Clearing {label} at {path}...")
+                for filename in os.listdir(path):
+                    file_path = os.path.join(path, filename)
+                    try:
+                        if os.path.isfile(file_path) or os.path.islink(file_path):
+                            os.unlink(file_path)
+                        elif os.path.isdir(file_path):
+                            shutil.rmtree(file_path)
+                    except Exception as e:
+                        print(f"  Failed to delete {file_path}. Reason: {e}")
+                print(f"Successfully cleared {label}.")
+            except Exception as e:
+                print(f"Error clearing {label}: {e}")
+        else:
+            print(f"{label} directory not found at {path}, skipping.")
 
     # 1. Clear indexing state file
     if os.path.exists(indexing_state):
@@ -47,39 +68,16 @@ def clear_local_memory():
         print(f"{indexing_state} not found, skipping.")
 
     # 2. Clear vector storage
-    if os.path.exists(vector_path):
-        try:
-            shutil.rmtree(vector_path)
-            os.makedirs(vector_path)
-            print(f"Cleared {vector_path}")
-        except Exception as e:
-            print(f"Error clearing {vector_path}: {e}")
+    clear_dir_contents(vector_path, "Vector Storage")
 
-    # 3. Clear summary storage
-    if os.path.exists(summary_path):
-        try:
-            shutil.rmtree(summary_path)
-            os.makedirs(summary_path)
-            print(f"Cleared {summary_path}")
-        except Exception as e:
-            print(f"Error clearing {summary_path}: {e}")
+    # 3. Clear summary index storage (from SummaryIndexer)
+    clear_dir_contents(summary_path, "Summary Index Storage")
 
     # 4. Clear generated guardrails
-    if os.path.exists(guardrails_path):
-        try:
-            # We don't want to delete the directory itself, only contents
-            for filename in os.listdir(guardrails_path):
-                file_path = os.path.join(guardrails_path, filename)
-                try:
-                    if os.path.isfile(file_path) or os.path.islink(file_path):
-                        os.unlink(file_path)
-                    elif os.path.isdir(file_path):
-                        shutil.rmtree(file_path)
-                except Exception as e:
-                    print(f'Failed to delete {file_path}. Reason: {e}')
-            print(f"Cleared contents of {guardrails_path}")
-        except Exception as e:
-            print(f"Error clearing {guardrails_path}: {e}")
+    clear_dir_contents(guardrails_path, "Generated Guardrails")
+    
+    # 5. Clear generated document summaries (from GuardrailManager)
+    clear_dir_contents(doc_summaries_path, "Generated Document Summaries")
     
     print("Local memory cleared successfully.")
 
