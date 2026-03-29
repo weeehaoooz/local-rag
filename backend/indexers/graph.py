@@ -1,4 +1,5 @@
 from llama_index.llms.ollama import Ollama
+from datetime import datetime, timezone
 import os
 import re
 import asyncio
@@ -80,13 +81,68 @@ class RobustSchemaExtractor(SchemaLLMPathExtractor):
             print(f"     [DEBUG] Verification failed: {e}. Falling back to original extractions.", flush=True)
             return triplets
 
+    def _extract_temporal_properties(self, rel_type: str, node_text: str, subj_name: str, obj_name: str) -> dict:
+        """
+        Ask the LLM to detect temporal qualifiers for a specific relationship.
+        Returns a dict with optional 'valid_from' and 'valid_to' keys.
+        """
+        # Quick heuristic: only call LLM if temporal keywords are present
+        temporal_keywords = [
+            "since", "from", "until", "to", "between", "during",
+            "started", "ended", "joined", "left", "resigned",
+            "appointed", "established", "founded", "dissolved",
+        ]
+        text_lower = node_text.lower()
+        if not any(kw in text_lower for kw in temporal_keywords):
+            return {}
+
+        prompt = (
+            "You are a temporal metadata extractor. Given the relationship below and its source text, "
+            "determine if there are any time qualifiers (start date, end date) for this relationship.\n\n"
+            f"Relationship: ({subj_name}) --[{rel_type}]--> ({obj_name})\n"
+            f"Source text: {node_text[:1000]}\n\n"
+            "Respond with ONLY a JSON object with these optional keys:\n"
+            '- "valid_from": start date/year as string (e.g. "2020", "2020-01", "2020-01-15")\n'
+            '- "valid_to": end date/year as string, or "present" if ongoing\n\n'
+            'If no temporal info is found, respond with: {}\n'
+            "Do NOT include any explanation."
+        )
+        try:
+            response = self.llm.complete(prompt).text.strip()
+            import json as _json
+            # Extract JSON from response
+            start = response.find("{")
+            end = response.rfind("}") + 1
+            if start != -1 and end > start:
+                parsed = _json.loads(response[start:end])
+                result = {}
+                if parsed.get("valid_from"):
+                    result["valid_from"] = str(parsed["valid_from"])
+                if parsed.get("valid_to"):
+                    result["valid_to"] = str(parsed["valid_to"])
+                return result
+        except Exception:
+            pass
+        return {}
+
     def __call__(self, nodes, show_progress=False, **kwargs):
         from llama_index.core.graph_stores.types import KG_RELATIONS_KEY, KG_NODES_KEY, Relation, EntityNode
+
+        now_iso = datetime.now(timezone.utc).isoformat()
 
         result_nodes = []
         for node in nodes:
             try:
                 node_text = node.get_content(metadata_mode="llm")
+
+                # Extract source_section from the chunk's content (first heading line)
+                source_section = ""
+                for line in node_text.split("\n"):
+                    stripped = line.strip()
+                    if stripped and _SECTION_HEADING_RE.match(stripped):
+                        source_section = stripped.lstrip("# ").strip()
+                        break
+
                 kg_schema = self.llm.structured_predict(
                     self.kg_schema_cls,
                     self.extract_prompt,
@@ -117,29 +173,50 @@ class RobustSchemaExtractor(SchemaLLMPathExtractor):
                         subj_type = triplet.subject.type or "Entity"
                         obj_type  = triplet.object.type or "Entity"
 
+                        # Temporal metadata: detect valid_from / valid_to
+                        temporal_props = self._extract_temporal_properties(
+                            rel_type, node_text, subj_name, obj_name
+                        )
+
                         # Use the normalized ID as the EntityNode name so that
                         # Neo4j's MERGE matches it with the Relation endpoints.
                         # The original human-readable name is stored in "title".
+                        node_props = {
+                            "entity_type": subj_type,
+                            "title": subj_name,
+                            "indexed_at": now_iso,
+                        }
+                        if source_section:
+                            node_props["source_section"] = source_section
+
                         subj = EntityNode(
                             name=subj_id,
                             label=subj_type,
-                            properties={
-                                "entity_type": subj_type,
-                                "title": subj_name,
-                            },
+                            properties=node_props,
                         )
+
+                        obj_props = {
+                            "entity_type": obj_type,
+                            "title": obj_name,
+                            "indexed_at": now_iso,
+                        }
+                        if source_section:
+                            obj_props["source_section"] = source_section
+
                         obj = EntityNode(
                             name=obj_id,
                             label=obj_type,
-                            properties={
-                                "entity_type": obj_type,
-                                "title": obj_name,
-                            },
+                            properties=obj_props,
                         )
+
+                        rel_properties = {"indexed_at": now_iso}
+                        rel_properties.update(temporal_props)
+
                         rel = Relation(
                             source_id=subj_id,
                             target_id=obj_id,
                             label=rel_type,
+                            properties=rel_properties,
                         )
                         kg_nodes_list.extend([subj, obj])
                         kg_relations_list.append(rel)

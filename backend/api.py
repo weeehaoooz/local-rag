@@ -81,6 +81,7 @@ class ChatResponse(BaseModel):
     sources: list[Source]
     stats: ChatStats = ChatStats()
     graph_context: list[GraphNode] = []
+    query_type: str = "LOCAL"
 
 
 # ── Routes ────────────────────────────────────────────────────────────
@@ -102,6 +103,7 @@ def chat(req: ChatRequest):
         sources=[Source(**s) for s in result["sources"]],
         stats=ChatStats(**result.get("stats", {})),
         graph_context=[GraphNode(text=g[0], source=g[1]) for g in result.get("graph_context", [])],
+        query_type=result.get("query_type", "LOCAL"),
     )
 
 

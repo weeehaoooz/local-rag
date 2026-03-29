@@ -375,7 +375,10 @@ class GuardrailManager:
             "5. NO SPECULATION: Extract only what is explicitly stated in the text. If the text is vague, DO NOT extract the triplet.\n"
             "6. CONSISTENT TYPES: Stick strictly to the allowed business objects and relationship types.\n"
             "7. CONSISTENT NAMING: Never produce two different names for the same entity across triplets. "
-            "If you referred to an entity as 'company_x' in one triplet, always use 'company_x' in all subsequent triplets.\n\n"
+            "If you referred to an entity as 'company_x' in one triplet, always use 'company_x' in all subsequent triplets.\n"
+            "8. TEMPORAL AWARENESS: If a relationship has a time qualifier "
+            "(e.g., 'from 2020', 'since January', 'between 2018 and 2022', 'joined in March 2019'), "
+            "preserve it. The system will extract valid_from/valid_to metadata automatically.\n\n"
             f"{few_shot_examples}"
             "Extract the triplets now from the following text:\n\n"
         )
