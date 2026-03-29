@@ -1,0 +1,34 @@
+# Company Profile: TechVanguard Solutions
+
+**Name**: TechVanguard Solutions
+**Industry**: Cybersecurity & Enterprise Infrastructure
+**Headquarters**: Singapore
+**Founded**: 2015
+**Website**: www.techvanguard.solutions
+**Mission**: "Securing the future of digital enterprises with zero-trust and quantum-ready solutions."
+
+## Overview
+TechVanguard Solutions is a leading cybersecurity firm headquartered in Singapore, providing advanced threat protection and infrastructure security services to government agencies, financial institutions, and multinational corporations across Asia Pacific. We specialize in zero-trust architectures, identity and access management (IAM), and advanced encryption techniques.
+
+## Core Services
+* **Zero-Trust Implementation**: Comprehensive architecture design and deployment of zero-trust security frameworks for distributed workforces.
+* **Incident Response & Digital Forensics**: Rapid-response teams to mitigate cyber threats and conduct post-incident investigations.
+* **Quantum-Safe Encryption**: Developing and deploying next-generation encryption standards to protect sensitive data against emerging quantum computing threats.
+* **Managed Security Services (MSSP)**: 24/7 security monitoring through our state-of-the-art Security Operations Centers (SOC).
+
+## Key Clients
+* **Government of Singapore (GovTech)**: Secured key digital infrastructure for national services.
+* **UOB Bank**: Implemented advanced threat detection for their regional mobile banking app.
+* **NCS Group**: Partnered on large-scale smart city security initiatives.
+* **SIA**: Designed and deployed a secure, multi-region cloud security architecture.
+
+## Key People
+* **Dr. Adam Leong (CEO)**: Former CISO at a major international bank and a recognized expert in cybersecurity policy and strategy.
+* **Elena Vasileva (Chief Security Architect)**: Expert in cryptography and former senior researcher at a leading European cybersecurity institute.
+
+## Recent Achievements
+* **Cybersecurity Excellence Award (2023)**: Recognized as the "Best Innovative Cybersecurity Firm" in Asia.
+* **Zero-Trust Pioneer Certification**: One of the first firms in the region to achieve global certification for zero-trust implementation.
+
+## Company Culture & Values
+"Vigilance, Integrity, Innovation." Our culture is built around a mindset of perpetual curiosity and proactive protection. We invest heavily in our "Vanguard Labs" to research and anticipate future security challenges.

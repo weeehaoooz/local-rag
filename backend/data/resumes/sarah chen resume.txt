@@ -1,0 +1,50 @@
+Name: Sarah Chen
+Email: sarah.chen.dev@gmail.com
+Contact No: +65 9123 4567 • LinkedIn: linkedin.com/in/sarah-chen-dev
+Singaporean
+
+Summary
+Senior Software Engineer with over 8 years of experience in cloud-native application development and DevOps. Passionate about building scalable microservices and automating deployment pipelines. Extensive experience with AWS, Kubernetes, and Golang.
+
+Core Competencies
+Languages: Golang, TypeScript, Python, Java
+Cloud & DevOps: AWS (EKS, Lambda, S3), Kubernetes, Docker, Terraform, Jenkins, GitHub Actions
+Databases: PostgreSQL, MongoDB, Redis, DynamoDB
+
+Professional Experience
+GovTech Singapore – Senior Software Engineer
+Jan 2021 – Present
+- Lead developer for the "National Digital Identity" initiative, architecting high-concurrency microservices that handle over 1M requests per hour.
+- Implemented a GitOps workflow using ArgoCD, reducing deployment lead time from 2 days to 15 minutes.
+- Optimized database queries for the "Singpass" integration, improving response times by 30% during peak login periods.
+- Mentored junior engineers and conducted weekly code reviews to ensure high-quality standards and security compliance.
+
+DBS Bank – Software Engineer (Cloud Platform)
+Aug 2017 – Dec 2020
+- Developed a self-service provisioning portal for internal developers, enabling automated infrastructure-as-code deployments via Terraform.
+- Migrated legacy monolithic services to a Kubernetes-based microservices architecture, improving system resilience and scalability.
+- Contributed to the development of a real-time transaction monitoring system using Kafka and Spring Boot.
+- Designed and implemented a robust API gateway to manage over 500 internal and external endpoints.
+
+Education
+National University of Singapore (NUS)
+Bachelor of Computing (Computer Science)
+Aug 2013 – May 2017
+First Class Honours
+
+Academic / Personal Projects
+Open-Source Cloud Monitor
+- Created a CLI tool in Go that aggregates cloud resource usage and provides cost optimization recommendations.
+- Gained over 500 stars on GitHub and contributions from 10+ developers.
+Smart Home Automation System
+- Developed a private IoT hub using Raspberry Pi and Zigbee to control lightning and security devices via a custom mobile app.
+
+Skills
+Communication: English (Fluent), Mandarin (Fluent)
+Technical: Distributed Systems, Serverless Computing, Performance Tuning
+Soft Skills: Technical Leadership, Problem Solving, Analytical Thinking
+
+Certifications
+- AWS Certified Solutions Architect – Professional
+- Certified Kubernetes Administrator (CKA)
+- HashiCorp Certified: Terraform Associate

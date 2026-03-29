@@ -1,0 +1,50 @@
+Name: David Raj
+Email: david.raj.quant@gmail.com
+Contact No: +65 9234 5678 • LinkedIn: linkedin.com/in/david-raj-quant
+Singaporean
+
+Summary
+Quantitative Analyst with 5 years of experience in high-frequency trading and financial risk management. Expertise in developing algorithmic trading strategies and statistical models. Proficient in Python, C++, and R for data-driven financial analysis.
+
+Core Competencies
+Financial Modeling: Risk-Neutral Pricing, Volatility Surface Construction, Stochastic Calculus
+Algorithms: Market Making, Statistical Arbitrage, Order Execution Strategies
+Technical: Python (NumPy, Pandas, Scikit-learn), C++ (STL, Boost), R (Tidyverse), SQL
+
+Professional Experience
+Jump Trading – Quantitative Analyst
+Jan 2021 – Present
+- Developed and backtested low-latency market-making strategies for Singapore and Hong Kong equity markets.
+- Implemented real-time risk dashboards to monitor portfolio exposure and VaR (Value-at-Risk) across diverse asset classes.
+- Used machine learning models to predict order book imbalances and improve execution alpha.
+- Conducted post-trade analysis to identify slippage and optimize trade implementation shortfalls.
+
+Citibank – Quantitative Risk Associate
+Feb 2018 – Dec 2020
+- Built stress-testing frameworks for the retail banking division, simulating various economic scenarios to assess capital adequacy.
+- Developed automated reporting pipelines for Basel III compliance, reducing manual data entry by 50%.
+- Performed rigorous model validation for credit risk models, ensuring adherence to internal risk policies and regulatory requirements.
+- Collaborated with IT to integrate quantitative models into core banking systems.
+
+Education
+Nanyang Technological University (NTU)
+Bachelor of Science (Mathematical Sciences)
+Aug 2014 – May 2018
+First Class Honours
+
+Academic / Personal Projects
+Crypto Arbitrage Bot
+- Built a Python-based bot to identify and execute arbitrage opportunities between centralized crypto exchanges.
+- Integrated WebSockets for real-time market data ingestion and REST APIs for trade execution.
+Sentiment-Based Stock Predictor
+- Developed a natural language processing (NLP) model to analyze news headlines and social media sentiment for stock price prediction.
+
+Skills
+Communication: English (Fluent), Tamil (Conversational)
+Technical: Monte Carlo Simulation, Time Series Analysis, Machine Learning
+Soft Skills: Quantitative Reasoning, Strategic Planning, Detail-Oriented
+
+Certifications
+- Financial Risk Manager (FRM) – Certified
+- CFA Level 2 (Passed)
+- Professional Python Developer Certification
