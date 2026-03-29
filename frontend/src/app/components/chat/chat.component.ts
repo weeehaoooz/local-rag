@@ -6,6 +6,7 @@ import {
   ElementRef,
   ChangeDetectionStrategy,
   effect,
+  OnInit,
 } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { ChatService } from '../../services/chat.service';
@@ -20,13 +21,14 @@ import { LlmMode } from '../../models/chat.models';
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [FormsModule, MessageBubbleComponent, ConversationSidebarComponent],
 })
-export class ChatComponent {
+export class ChatComponent implements OnInit {
   readonly chatService = inject(ChatService);
 
   readonly messages = this.chatService.messages;
   readonly isLoading = this.chatService.isLoading;
   readonly llmMode = this.chatService.llmMode;
   readonly activeConversation = this.chatService.activeConversation;
+  readonly quickPrompts = this.chatService.quickPrompts;
   readonly userInput = signal('');
   readonly isSettingsOpen = signal(false);
 
@@ -46,6 +48,16 @@ export class ChatComponent {
         this.chatService.createConversation();
       }
     });
+  }
+
+  ngOnInit(): void {
+    this.chatService.fetchQuickPrompts();
+  }
+
+  applyPrompt(text: string): void {
+    if (this.isLoading()) return;
+    this.userInput.set(text);
+    this.sendMessage();
   }
 
   sendMessage(): void {

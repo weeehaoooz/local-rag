@@ -8,6 +8,7 @@ import {
   LlmMode,
   TitleRequest,
   TitleResponse,
+  SuggestionResponse,
 } from '../models/chat.models';
 
 const STORAGE_KEY = 'kg_rag_conversations';
@@ -31,6 +32,9 @@ export class ChatService {
 
   /** Whether a request is in-flight */
   readonly isLoading = signal(false);
+
+  /** Quick prompts fetched from KG */
+  readonly quickPrompts = signal<string[]>([]);
 
   /** Active conversation object */
   readonly activeConversation = computed(() => {
@@ -157,6 +161,7 @@ export class ChatService {
           timestamp: new Date(),
           stats: res.stats,
           graphContext: res.graph_context,
+          suggestedPrompts: res.suggested_prompts,
         };
         this._addMessage(convId!, assistantMessage);
 
@@ -200,6 +205,16 @@ export class ChatService {
         this._persist();
         console.error('Chat API error:', err);
       },
+    });
+  }
+
+  fetchQuickPrompts(): void {
+    this.http.get<SuggestionResponse>(`${this.apiUrl}/suggestions`).subscribe({
+      next: (res) => this.quickPrompts.set(res.suggestions || []),
+      error: (err) => {
+        console.error('Failed to load suggestions', err);
+        this.quickPrompts.set([]);
+      }
     });
   }
 

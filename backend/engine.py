@@ -367,6 +367,68 @@ class HybridEngine:
         return sources
 
     # ──────────────────────────────────────────────────────────────────
+    # Quick Prompts / Suggestions
+    # ──────────────────────────────────────────────────────────────────
+
+    def get_suggestions(self, limit: int = 4) -> list[str]:
+        """
+        Dynamically suggest "quick prompts" based on the most connected entities
+        or broad communities in the Knowledge Graph.
+        """
+        suggestions = []
+        try:
+            # 1. Grab top entities by relationship count (degree)
+            entity_query = """
+            MATCH (n)
+            WHERE NOT any(lbl IN labels(n) WHERE lbl IN ['__Community__', 'Category', 'CommunitySummary'])
+              AND n.name IS NOT NULL
+            WITH n, size((n)--()) AS degree
+            ORDER BY degree DESC
+            LIMIT 5
+            RETURN n.name AS name, degree
+            """
+            entities = self.graph_store.structured_query(entity_query)
+            if isinstance(entities, list):
+                for e in entities:
+                    if isinstance(e, dict) and e.get("name"):
+                        suggestions.append(f"Tell me about {e['name']}")
+                    elif hasattr(e, "values"):
+                        vals = list(e.values())
+                        if vals and vals[0]:
+                            suggestions.append(f"Tell me about {vals[0]}")
+
+            # 2. Grab top communities (themes) if available
+            if self.community_summarizer:
+                summaries = self.community_summarizer.get_all_summaries()
+                for comm in summaries[:3]:
+                    keys = comm.get("key_entities", "")
+                    if keys:
+                        parts = keys.split(",")
+                        if parts:
+                            top_entity = parts[0].strip()
+                            suggestions.append(f"What is the connection between {top_entity} and others?")
+
+            # Deduplicate and limit
+            seen = set()
+            unique_suggestions = []
+            for s in suggestions:
+                if s not in seen:
+                    seen.add(s)
+                    unique_suggestions.append(s)
+                    if len(unique_suggestions) >= limit:
+                        break
+
+            return unique_suggestions
+
+        except Exception as e:
+            print(f"  [Suggestions] Failed to get suggestions: {e}")
+            return [
+                "What forms of renewable energy are discussed?",
+                "Tell me about recent tech advancements",
+                "Summarize the key themes in the documents",
+            ]
+
+    # ──────────────────────────────────────────────────────────────────
     # Retrieval (refactored with QueryType routing)
     # ──────────────────────────────────────────────────────────────────
 
@@ -574,6 +636,17 @@ class HybridEngine:
             if history_blocks:
                 history_text = "CONVERSATION HISTORY (Previous turns):\n" + "\n\n".join(history_blocks) + "\n\n---\n\n"
 
+        has_context = bool(context_parts)
+        if not has_context:
+            suggs = self.get_suggestions(limit=3)
+            sg_str = "\n".join(f"- {s}" for s in suggs)
+            context_parts.append(
+                f"NO RELEVANT CONTEXT FOUND.\n"
+                f"The user's query did not match any documents in the knowledge base.\n"
+                f"Please politely inform the user that you don't have specific documents on this topic, but suggest they ask about the following topics that ARE in the knowledge base:\n"
+                f"{sg_str}"
+            )
+
         combined_context = "\n\n---\n\n".join(filter(None, context_parts)) if context_parts else "No relevant context found."
         combined_context = history_text + combined_context
 
@@ -614,6 +687,8 @@ INSTRUCTIONS — PLANNING MODE:
    - If you need clarification from the user, ask them directly.
 3. At the very end list: [SOURCES_USED]: SourceTitle1, SourceTitle2, ...
    If no sources were used, write [SOURCES_USED]: None
+4. After sources, provide exactly 3 suggested follow-up questions for the user based on your response.
+   CRITICAL: Use the exact format [FOLLOW_UP]: Question 1 | Question 2 | Question 3 (separator is the pipe character '|').
 """
         else:
             # Fast mode: direct, concise answer
@@ -631,6 +706,8 @@ CRITICAL INSTRUCTIONS:
 3. At the very end of your response, list the unique source titles you actually used to form your answer.
 4. Use the exact format: [SOURCES_USED]: SourceTitle1, SourceTitle2, ...
 5. If you cannot answer the question, didn't use any context, or are asking a clarifying question, say "[SOURCES_USED]: None".
+6. After sources, provide exactly 3 suggested follow-up questions for the user based on your response.
+   CRITICAL: Use the exact format [FOLLOW_UP]: Question 1 | Question 2 | Question 3 (separator is the pipe character '|').
 """
 
         # Call LLM (override num_ctx per-request for planning mode)
@@ -669,19 +746,40 @@ CRITICAL INSTRUCTIONS:
                 utilization = total_tokens / context_window
                 stats["context_utilization"] = round(utilization, 4)
 
-        # Parse the response for citations
+        # Parse the response for citations and follow-ups
+        import re
         answer = raw_response
         cited_sources = []
+        suggested_prompts = []
 
-        marker = "[SOURCES_USED]:"
-        if marker in raw_response:
-            parts = raw_response.split(marker)
-            answer = parts[0].strip()
-            source_list_str = parts[1].strip()
+        # Split on FOLLOW_UP marker (handles optional brackets)
+        follow_parts = re.split(r'\[?FOLLOW_UP\]?:', raw_response, flags=re.IGNORECASE)
+        if len(follow_parts) > 1:
+            raw_response = follow_parts[0].strip()
+            followup_str = follow_parts[1].strip()
+            if followup_str:
+                # Try splitting by pipe first
+                if "|" in followup_str:
+                    suggested_prompts = [q.strip() for q in followup_str.split("|") if q.strip()]
+                else:
+                    # Fallback: split by question mark followed by space or newline
+                    suggested_prompts = [q.strip() + "?" for q in re.split(r'\?\s*', followup_str) if q.strip()]
+                    suggested_prompts = [q.replace("??", "?") for q in suggested_prompts]
+                
+                # Limit to 3
+                suggested_prompts = suggested_prompts[:3]
+
+        # Split on SOURCES_USED marker (handles optional brackets)
+        source_parts = re.split(r'\[?SOURCES_USED\]?:', raw_response, flags=re.IGNORECASE)
+        if len(source_parts) > 1:
+            answer = source_parts[0].strip()
+            source_list_str = source_parts[1].strip()
 
             if source_list_str and source_list_str.lower() != "none":
                 titles = [t.strip() for t in source_list_str.split(",") if t.strip()]
                 cited_sources = titles
+        else:
+            answer = raw_response.strip()
 
         # Filter the original source list based on what the LLM cited
         filtered_sources = []
@@ -699,6 +797,7 @@ CRITICAL INSTRUCTIONS:
             "stats": stats,
             "query_type": query_type.value,
             "graph_context": context_data.get("raw_graph_context", context_data.get("graph_context", [])),
+            "suggested_prompts": suggested_prompts,
         }
 
     def close(self):

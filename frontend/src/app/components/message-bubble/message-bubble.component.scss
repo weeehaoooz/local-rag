@@ -200,6 +200,62 @@
   }
 }
 
+// ── Suggested Prompts ───────────────────────────────────────────────
+.suggested-prompts-container {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px dashed rgba(255, 255, 255, 0.1);
+
+  .suggested-prompts-title {
+    display: block;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.5);
+    margin-bottom: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .suggested-prompts-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .suggested-prompt-btn {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px;
+    background: rgba(0, 0, 0, 0.2);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 16px;
+    color: #e0dff5;
+    font-size: 0.85rem;
+    text-align: left;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    font-family: inherit;
+
+    .icon {
+      font-size: 0.9rem;
+      opacity: 0.7;
+      filter: sepia(1) hue-rotate(200deg) saturate(3);
+    }
+
+    &:hover {
+      background: rgba(108, 92, 231, 0.15);
+      border-color: rgba(108, 92, 231, 0.4);
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(108, 92, 231, 0.1);
+    }
+
+    &:active {
+      transform: translateY(0);
+    }
+  }
+}
+
 @keyframes slideIn {
   from {
     opacity: 0;

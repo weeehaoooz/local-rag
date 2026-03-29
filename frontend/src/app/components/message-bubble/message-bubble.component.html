@@ -61,5 +61,18 @@
         </span>
       </div>
     }
+
+    @if (message().suggestedPrompts && message().suggestedPrompts!.length > 0) {
+      <div class="suggested-prompts-container">
+        <span class="suggested-prompts-title">Suggested Follow-ups:</span>
+        <div class="suggested-prompts-list">
+          @for (prompt of message().suggestedPrompts; track prompt) {
+            <button class="suggested-prompt-btn" (click)="promptClick.emit(prompt)">
+              <span class="icon">🔍</span> {{ prompt }}
+            </button>
+          }
+        </div>
+      </div>
+    }
   </div>
 </div>

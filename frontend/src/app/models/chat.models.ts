@@ -26,6 +26,7 @@ export interface ChatMessage {
   timestamp: Date;
   stats?: ChatStats;
   graphContext?: GraphNode[];
+  suggestedPrompts?: string[];
 }
 
 export interface Conversation {
@@ -61,6 +62,7 @@ export interface ChatResponse {
   stats: ChatStats;
   graph_context: GraphNode[];
   query_type: string;
+  suggested_prompts?: string[];
 }
 
 export interface TitleRequest {
@@ -70,3 +72,8 @@ export interface TitleRequest {
 export interface TitleResponse {
   title: string;
 }
+
+export interface SuggestionResponse {
+  suggestions: string[];
+}
+

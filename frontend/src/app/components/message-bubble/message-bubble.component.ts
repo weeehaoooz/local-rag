@@ -1,4 +1,4 @@
-import { Component, input, ChangeDetectionStrategy } from '@angular/core';
+import { Component, input, output, ChangeDetectionStrategy } from '@angular/core';
 import { ChatMessage } from '../../models/chat.models';
 import { SourceBadgeComponent } from '../source-badge/source-badge.component';
 import { DatePipe, DecimalPipe } from '@angular/common';
@@ -12,4 +12,5 @@ import { DatePipe, DecimalPipe } from '@angular/common';
 })
 export class MessageBubbleComponent {
   readonly message = input.required<ChatMessage>();
+  readonly promptClick = output<string>();
 }

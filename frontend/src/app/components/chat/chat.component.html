@@ -61,20 +61,16 @@
           <h2>Start a Conversation</h2>
           <p>Ask questions about the documents in your knowledge base. Responses will show which sources were used.</p>
           <div class="suggestion-chips">
-            <button class="chip" (click)="userInput.set('Who is Marcus Lim?'); sendMessage()">
-              Who is Marcus Lim?
-            </button>
-            <button class="chip" (click)="userInput.set('Tell me about Apex Global Solutions'); sendMessage()">
-              Tell me about Apex Global Solutions
-            </button>
-            <button class="chip" (click)="userInput.set('What companies are in the knowledge base?'); sendMessage()">
-              What companies are in the knowledge base?
-            </button>
+            @for (prompt of quickPrompts(); track prompt) {
+              <button class="chip" (click)="applyPrompt(prompt)">
+                {{ prompt }}
+              </button>
+            }
           </div>
         </div>
       } @else {
         @for (msg of messages(); track msg.id) {
-          <app-message-bubble [message]="msg" />
+          <app-message-bubble [message]="msg" (promptClick)="applyPrompt($event)" />
         }
       }
 

@@ -90,6 +90,7 @@ class ChatResponse(BaseModel):
     stats: ChatStats = ChatStats()
     graph_context: list[GraphNode] = []
     query_type: str = "LOCAL"
+    suggested_prompts: list[str] = []
 
 
 class TitleRequest(BaseModel):
@@ -100,10 +101,21 @@ class TitleResponse(BaseModel):
     title: str
 
 
+class SuggestionResponse(BaseModel):
+    suggestions: list[str]
+
+
 # ── Routes ────────────────────────────────────────────────────────────
 @app.get("/api/health")
 def health_check():
     return {"status": "ok"}
+
+
+@app.get("/api/suggestions", response_model=SuggestionResponse)
+def get_suggestions():
+    engine = _get_engine()
+    suggs = engine.get_suggestions(limit=4)
+    return SuggestionResponse(suggestions=suggs)
 
 
 @app.post("/api/chat", response_model=ChatResponse)
@@ -125,6 +137,7 @@ def chat(req: ChatRequest):
         stats=ChatStats(**result.get("stats", {})),
         graph_context=[GraphNode(text=g[0], source=g[1]) for g in result.get("graph_context", [])],
         query_type=result.get("query_type", "LOCAL"),
+        suggested_prompts=result.get("suggested_prompts", []),
     )
 
 
