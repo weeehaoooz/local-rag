@@ -507,7 +507,11 @@ class HybridEngine:
     # Chat
     # ──────────────────────────────────────────────────────────────────
 
-    def chat(self, user_message: str) -> dict:
+    # ── Planning mode context window (larger than fast)
+    PLANNING_CONTEXT_WINDOW = 16384
+    FAST_CONTEXT_WINDOW = int(os.getenv("OLLAMA_CONTEXT_WINDOW", "8192"))
+
+    def chat(self, user_message: str, mode: str = "fast", history: list = None, system_prompt: str = "") -> dict:
         """
         End-to-end RAG chat:
           1. Classify query via LLM router (LOCAL / GLOBAL / HYBRID)
@@ -559,7 +563,19 @@ class HybridEngine:
                 context_data["community_context"][:2]
             ))
 
+        history_text = ""
+        if history:
+            history_blocks = []
+            for msg in history[-6:]:
+                role = msg.get("role", "user").upper()
+                content = msg.get("content", "").strip()
+                if content:
+                    history_blocks.append(f"{role}: {content}")
+            if history_blocks:
+                history_text = "CONVERSATION HISTORY (Previous turns):\n" + "\n\n".join(history_blocks) + "\n\n---\n\n"
+
         combined_context = "\n\n---\n\n".join(filter(None, context_parts)) if context_parts else "No relevant context found."
+        combined_context = history_text + combined_context
 
         # Query-type-specific instructions
         if query_type == QueryType.LOCAL:
@@ -569,39 +585,86 @@ class HybridEngine:
         else:  # HYBRID
             focus_instruction = "Use both the specific entity data and the broader thematic context below to provide a thorough answer."
 
-        prompt = f"""You are a helpful AI assistant. {focus_instruction}
-Base your answer ONLY on the provided context. If the context doesn't contain enough information to answer fully, say so.
+        custom_system_context = f"\n\nADDITIONAL SYSTEM INSTRUCTIONS:\n{system_prompt}\n" if system_prompt and system_prompt.strip() else ""
+
+        is_planning = (mode == "planning")
+
+        if is_planning:
+            # Planning mode: chain-of-thought reasoning, larger context
+            num_ctx = self.PLANNING_CONTEXT_WINDOW
+            prompt = f"""You are a meticulous AI research assistant operating in PLANNING MODE.
+{focus_instruction}{custom_system_context}
+
+Your task is to reason carefully and thoroughly before giving a final answer.
+Use the provided context to inform your answer if it is relevant. If the context is insufficient, or if the user is asking a general question, you may use your broad knowledge to answer. If the request is ambiguous or you need more specific context from the user, you may ask clarifying questions.
+
+{combined_context}
+
+USER QUESTION: {user_message}
+
+INSTRUCTIONS — PLANNING MODE:
+1. First, write a brief <thinking> section where you:
+   a. Identify what the user is asking
+   b. Note which context blocks are directly relevant
+   c. Identify any gaps or ambiguities that require asking the user
+2. Then write your final answer (or follow-up questions) in a <answer> section:
+   - Be thorough and well-structured (use bullet points or sections where helpful)
+   - Include temporal context (dates, time ranges) when available
+   - Cite the sources inline where possible
+   - If you need clarification from the user, ask them directly.
+3. At the very end list: [SOURCES_USED]: SourceTitle1, SourceTitle2, ...
+   If no sources were used, write [SOURCES_USED]: None
+"""
+        else:
+            # Fast mode: direct, concise answer
+            num_ctx = self.FAST_CONTEXT_WINDOW
+            prompt = f"""You are a helpful AI assistant. {focus_instruction}{custom_system_context}
+Use the provided context to inform your answer if it is relevant. If the context is insufficient, or if the user is asking a general question, use your general knowledge. If you need more clarification from the user, ask them follow-up questions.
 
 {combined_context}
 
 USER QUESTION: {user_message}
 
 CRITICAL INSTRUCTIONS:
-1. Provide a clear, well-structured answer.
+1. Provide a clear, well-structured answer, or ask clarifying questions if needed.
 2. Include temporal context (dates, time ranges) when available in the data.
 3. At the very end of your response, list the unique source titles you actually used to form your answer.
 4. Use the exact format: [SOURCES_USED]: SourceTitle1, SourceTitle2, ...
-5. If you cannot answer the question or didn't use any context, do not list any sources or say "[SOURCES_USED]: None".
+5. If you cannot answer the question, didn't use any context, or are asking a clarifying question, say "[SOURCES_USED]: None".
 """
 
-        # Call LLM
-        response_obj = self.llm.complete(prompt)
+        # Call LLM (override num_ctx per-request for planning mode)
+        call_kwargs = {}
+        if is_planning:
+            call_kwargs = {"additional_kwargs": {"num_ctx": num_ctx}}
+        response_obj = self.llm.complete(prompt, **call_kwargs)
         raw_response = str(response_obj)
 
         # Extract performance metrics
-        stats = {}
+        context_window = num_ctx if is_planning else self.FAST_CONTEXT_WINDOW
+        stats = {
+            "context_window": context_window,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "context_utilization": 0.0,
+            "tps": 0.0,
+        }
         if hasattr(response_obj, "raw") and isinstance(response_obj.raw, dict):
             raw = response_obj.raw
             eval_count = raw.get("eval_count", 0)
             eval_duration = raw.get("eval_duration", 0)
             prompt_eval_count = raw.get("prompt_eval_count", 0)
 
+            stats["prompt_tokens"] = prompt_eval_count
+            stats["completion_tokens"] = eval_count
+            stats["total_tokens"] = prompt_eval_count + eval_count
+
             if eval_count > 0 and eval_duration > 0:
                 tps = eval_count / (eval_duration / 1e9)
                 stats["tps"] = round(tps, 2)
 
             total_tokens = prompt_eval_count + eval_count
-            context_window = getattr(self.llm, "context_window", 8192)
             if context_window > 0:
                 utilization = total_tokens / context_window
                 stats["context_utilization"] = round(utilization, 4)

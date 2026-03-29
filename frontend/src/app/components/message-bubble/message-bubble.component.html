@@ -55,7 +55,7 @@
           {{ stats.tps }} tok/s
         </span>
         <span class="stat-divider">·</span>
-        <span class="stat-item" title="Context Window Utilization">
+        <span class="stat-item" [title]="(stats.total_tokens | number) + ' / ' + (stats.context_window | number) + ' tokens'">
           <span class="stat-icon">🧠</span>
           {{ stats.context_utilization * 100 | number:'1.1-2' }}% context
         </span>

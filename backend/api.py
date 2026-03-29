@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from typing import Literal
 
 # ── Global engine reference ───────────────────────────────────────────
 _engine = None
@@ -58,6 +59,9 @@ app.add_middleware(
 # ── Models ────────────────────────────────────────────────────────────
 class ChatRequest(BaseModel):
     message: str
+    mode: Literal["fast", "planning"] = "fast"
+    history: list[dict] = []
+    system_prompt: str = ""
 
 
 class Source(BaseModel):
@@ -74,6 +78,10 @@ class GraphNode(BaseModel):
 class ChatStats(BaseModel):
     tps: float = 0.0
     context_utilization: float = 0.0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    context_window: int = 8192
 
 
 class ChatResponse(BaseModel):
@@ -82,6 +90,14 @@ class ChatResponse(BaseModel):
     stats: ChatStats = ChatStats()
     graph_context: list[GraphNode] = []
     query_type: str = "LOCAL"
+
+
+class TitleRequest(BaseModel):
+    first_message: str
+
+
+class TitleResponse(BaseModel):
+    title: str
 
 
 # ── Routes ────────────────────────────────────────────────────────────
@@ -96,7 +112,12 @@ def chat(req: ChatRequest):
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
 
     engine = _get_engine()
-    result = engine.chat(req.message)
+    result = engine.chat(
+        req.message, 
+        mode=req.mode, 
+        history=req.history,
+        system_prompt=req.system_prompt
+    )
 
     return ChatResponse(
         response=result["response"],
@@ -105,6 +126,26 @@ def chat(req: ChatRequest):
         graph_context=[GraphNode(text=g[0], source=g[1]) for g in result.get("graph_context", [])],
         query_type=result.get("query_type", "LOCAL"),
     )
+
+
+@app.post("/api/title", response_model=TitleResponse)
+def generate_title(req: TitleRequest):
+    """Generate a short AI title for a conversation based on its first message."""
+    engine = _get_engine()
+    try:
+        prompt = (
+            "Generate a concise, descriptive title (3-6 words max) for a conversation "
+            "that starts with this message. Return ONLY the title, no quotes, no punctuation at the end.\n\n"
+            f"Message: {req.first_message[:300]}"
+        )
+        title = engine.llm.complete(prompt).text.strip().strip('"\'').strip()
+        # Trim to a reasonable length
+        if len(title) > 60:
+            title = title[:60]
+        return TitleResponse(title=title)
+    except Exception as e:
+        print(f"Title generation failed: {e}")
+        return TitleResponse(title=req.first_message[:40] + ("..." if len(req.first_message) > 40 else ""))
 
 
 # ── Entrypoint ────────────────────────────────────────────────────────

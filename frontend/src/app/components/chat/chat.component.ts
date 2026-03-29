@@ -10,20 +10,25 @@ import {
 import { FormsModule } from '@angular/forms';
 import { ChatService } from '../../services/chat.service';
 import { MessageBubbleComponent } from '../message-bubble/message-bubble.component';
+import { ConversationSidebarComponent } from '../conversation-sidebar/conversation-sidebar.component';
+import { LlmMode } from '../../models/chat.models';
 
 @Component({
   selector: 'app-chat',
   templateUrl: './chat.component.html',
   styleUrl: './chat.component.scss',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [FormsModule, MessageBubbleComponent],
+  imports: [FormsModule, MessageBubbleComponent, ConversationSidebarComponent],
 })
 export class ChatComponent {
-  private readonly chatService = inject(ChatService);
+  readonly chatService = inject(ChatService);
 
   readonly messages = this.chatService.messages;
   readonly isLoading = this.chatService.isLoading;
+  readonly llmMode = this.chatService.llmMode;
+  readonly activeConversation = this.chatService.activeConversation;
   readonly userInput = signal('');
+  readonly isSettingsOpen = signal(false);
 
   readonly messagesContainer = viewChild<ElementRef<HTMLDivElement>>('messagesContainer');
 
@@ -32,6 +37,14 @@ export class ChatComponent {
     effect(() => {
       this.messages(); // track signal
       this.scrollToBottom();
+    });
+
+    // Create a default conversation on first load if none exist
+    effect(() => {
+      const convs = this.chatService.conversations();
+      if (convs.length === 0) {
+        this.chatService.createConversation();
+      }
     });
   }
 
@@ -50,8 +63,26 @@ export class ChatComponent {
     }
   }
 
+  setMode(mode: LlmMode): void {
+    this.chatService.llmMode.set(mode);
+  }
+
+  toggleSettings(): void {
+    this.isSettingsOpen.update(v => !v);
+  }
+
+  updateSystemPrompt(event: Event): void {
+    const val = (event.target as HTMLTextAreaElement).value;
+    this.chatService.updateSystemPrompt(val);
+  }
+
+  clearChat(): void {
+    if (confirm('Are you sure you want to clear all messages in this conversation?')) {
+      this.chatService.clearMessages();
+    }
+  }
+
   private scrollToBottom(): void {
-    // Use setTimeout to let the DOM update before scrolling
     setTimeout(() => {
       const el = this.messagesContainer()?.nativeElement;
       if (el) {

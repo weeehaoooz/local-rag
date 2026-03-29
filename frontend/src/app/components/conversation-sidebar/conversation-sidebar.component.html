@@ -1,0 +1,107 @@
+<div class="sidebar">
+  <!-- Header -->
+  <div class="sidebar-header">
+    <div class="sidebar-title">
+      <span class="sidebar-icon">💬</span>
+      <span>Conversations</span>
+    </div>
+    <button
+      class="new-chat-btn"
+      (click)="newConversation()"
+      title="New conversation"
+      id="new-conversation-btn"
+    >
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+        <line x1="12" y1="5" x2="12" y2="19"></line>
+        <line x1="5" y1="12" x2="19" y2="12"></line>
+      </svg>
+    </button>
+  </div>
+
+  <!-- Conversation list -->
+  <div class="conversation-list">
+    @if (conversations().length === 0) {
+      <div class="empty-sidebar">
+        <p>No conversations yet.</p>
+        <p>Click + to start.</p>
+      </div>
+    }
+
+    @for (conv of conversations(); track trackById($index, conv)) {
+      <div
+        class="conversation-item"
+        [class.active]="conv.id === activeConversationId()"
+        (click)="selectConversation(conv.id)"
+        [id]="'conv-' + conv.id"
+      >
+        <!-- Rename input -->
+        @if (editingId() === conv.id) {
+          <input
+            class="rename-input"
+            [value]="editingName()"
+            (input)="editingName.set($any($event.target).value)"
+            (blur)="commitRename(conv.id)"
+            (keydown)="onRenameKeyDown($event, conv.id)"
+            (click)="$event.stopPropagation()"
+            autofocus
+          />
+        } @else {
+          <div class="conv-info">
+            <div class="conv-name" [title]="conv.name">{{ conv.name }}</div>
+            <div class="conv-meta">
+              <span class="conv-count">{{ conv.messages.length }} msg{{ conv.messages.length !== 1 ? 's' : '' }}</span>
+              <span class="conv-date">{{ conv.updatedAt | date:'MMM d' }}</span>
+            </div>
+
+            <!-- Context bar -->
+            @if (conv.totalTokens > 0) {
+              <div class="context-bar-wrap">
+                <div
+                  class="context-bar-track"
+                  [title]="(conv.totalTokens | number) + ' / ' + (conv.contextWindow | number) + ' tokens (' + (conv.contextUtilization * 100 | number:'1.0-1') + '%)'"
+                >
+                  <div
+                    class="context-bar-fill"
+                    [class]="contextColour(conv.contextUtilization)"
+                    [style.width.%]="(conv.contextUtilization * 100)"
+                  ></div>
+                </div>
+                <span class="context-pct" [class]="contextColour(conv.contextUtilization)">
+                  {{ conv.contextUtilization * 100 | number:'1.0-1' }}%
+                </span>
+              </div>
+            }
+          </div>
+
+          <!-- Action buttons -->
+          <div class="conv-actions">
+            <button
+              class="action-btn rename-btn"
+              (click)="startRename($event, conv)"
+              title="Rename"
+              [id]="'rename-btn-' + conv.id"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+              </svg>
+            </button>
+            <button
+              class="action-btn delete-btn"
+              (click)="deleteConversation($event, conv.id)"
+              title="Delete"
+              [id]="'delete-btn-' + conv.id"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                <polyline points="3 6 5 6 21 6"></polyline>
+                <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>
+                <path d="M10 11v6M14 11v6"></path>
+                <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"></path>
+              </svg>
+            </button>
+          </div>
+        }
+      </div>
+    }
+  </div>
+</div>
