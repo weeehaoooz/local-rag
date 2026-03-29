@@ -53,24 +53,7 @@
               <span class="conv-date">{{ conv.updatedAt | date:'MMM d' }}</span>
             </div>
 
-            <!-- Context bar -->
-            @if (conv.totalTokens > 0) {
-              <div class="context-bar-wrap">
-                <div
-                  class="context-bar-track"
-                  [title]="(conv.totalTokens | number) + ' / ' + (conv.contextWindow | number) + ' tokens (' + (conv.contextUtilization * 100 | number:'1.0-1') + '%)'"
-                >
-                  <div
-                    class="context-bar-fill"
-                    [class]="contextColour(conv.contextUtilization)"
-                    [style.width.%]="(conv.contextUtilization * 100)"
-                  ></div>
-                </div>
-                <span class="context-pct" [class]="contextColour(conv.contextUtilization)">
-                  {{ conv.contextUtilization * 100 | number:'1.0-1' }}%
-                </span>
-              </div>
-            }
+
           </div>
 
           <!-- Action buttons -->

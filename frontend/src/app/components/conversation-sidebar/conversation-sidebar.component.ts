@@ -5,7 +5,7 @@ import {
   ChangeDetectionStrategy,
 } from '@angular/core';
 import { FormsModule } from '@angular/forms';
-import { DecimalPipe, DatePipe } from '@angular/common';
+import { DatePipe } from '@angular/common';
 import { ChatService } from '../../services/chat.service';
 import { Conversation } from '../../models/chat.models';
 
@@ -14,7 +14,7 @@ import { Conversation } from '../../models/chat.models';
   templateUrl: './conversation-sidebar.component.html',
   styleUrl: './conversation-sidebar.component.scss',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [FormsModule, DecimalPipe, DatePipe],
+  imports: [FormsModule, DatePipe],
 })
 export class ConversationSidebarComponent {
   readonly chatService = inject(ChatService);
@@ -62,12 +62,6 @@ export class ConversationSidebarComponent {
     if (event.key === 'Escape') this.cancelRename();
   }
 
-  /** Returns a CSS colour class based on utilization */
-  contextColour(utilization: number): string {
-    if (utilization >= 0.85) return 'danger';
-    if (utilization >= 0.6) return 'warning';
-    return 'ok';
-  }
 
   trackById(_: number, c: Conversation): string {
     return c.id;

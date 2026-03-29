@@ -149,66 +149,6 @@
   color: rgba(255, 255, 255, 0.28);
 }
 
-// ── Context Bar ───────────────────────────────────────────────────────
-.context-bar-wrap {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 4px;
-}
-
-.context-bar-track {
-  flex: 1;
-  height: 3px;
-  background: rgba(255, 255, 255, 0.08);
-  border-radius: 2px;
-  overflow: hidden;
-  cursor: help;
-
-  &:hover + .context-pct {
-    opacity: 1;
-  }
-}
-
-.context-bar-fill {
-  height: 100%;
-  border-radius: 2px;
-  transition: width 0.5s ease;
-  min-width: 2px;
-
-  &.ok {
-    background: linear-gradient(90deg, #00b894, #00cec9);
-  }
-
-  &.warning {
-    background: linear-gradient(90deg, #fdcb6e, #e17055);
-  }
-
-  &.danger {
-    background: linear-gradient(90deg, #e17055, #d63031);
-    box-shadow: 0 0 6px rgba(214, 48, 49, 0.4);
-  }
-}
-
-.context-pct {
-  font-size: 0.62rem;
-  font-weight: 600;
-  white-space: nowrap;
-  width: 34px;
-  text-align: right;
-
-  &.ok {
-    color: #00cec9;
-  }
-
-  &.warning {
-    color: #fdcb6e;
-  }
-
-  &.danger {
-    color: #e17055;
-  }
-}
 
 // ── Action Buttons ────────────────────────────────────────────────────
 .conv-actions {
