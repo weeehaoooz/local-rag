@@ -3,10 +3,21 @@ indexers/preprocessor.py
 ------------------------
 DocumentPreprocessor: clean and normalize raw text *before* chunking.
 
-Handles three concerns from the RAG best-practices guide:
+Handles four concerns from the RAG best-practices guide:
   1. Encoding & whitespace normalization  (ftfy, Unicode fixes)
-  2. Boilerplate removal                  (page numbers, running headers/footers, legal disclaimers)
-  3. Coreference resolution              (spaCy heuristic pronoun → named-entity substitution)
+  2. PDF/OCR artifact cleaning            (hyphenation, broken words, punctuation)
+  3. Boilerplate removal                  (page numbers, running headers/footers, legal disclaimers)
+  4. Coreference resolution              (spaCy heuristic pronoun → named-entity substitution)
+
+Metadata Preservation:
+  Cleaning operates *only* on ``doc.get_content()`` / ``doc.set_content()``.
+  Document metadata (page_number, sections, source_type, etc.) is never read or
+  mutated by any cleaning step.
+
+Batch & Streaming:
+  ``apreprocess_stream(docs)``  — async generator that yields cleaned documents
+  one at a time, avoiding large in-memory lists.
+  ``preprocess_batch(docs, batch_size)``  — processes in configurable batches.
 
 All steps degrade gracefully: if an optional dependency is absent the step is
 skipped with a warning rather than crashing the indexing pipeline.
@@ -16,7 +27,8 @@ from __future__ import annotations
 
 import re
 import logging
-from typing import List, Optional
+import asyncio
+from typing import AsyncIterator, Iterator, List, Optional, Any
 
 from llama_index.core.schema import Document
 
@@ -52,7 +64,9 @@ except ImportError:
 
 _BOILERPLATE_PATTERNS: list[re.Pattern] = [
     # Page numbers: "Page 3 of 12", "- 3 -", "3 | P a g e", etc.
-    re.compile(r"(?m)^[\-\s]*[Pp]age\s+\d+\s*(of\s+\d+)?[\-\s]*$"),
+    # Note: we avoid matching our own semantic [Page X] markers by requiring 
+    # the line to NOT start with '['.
+    re.compile(r"(?m)^(?![\[])[\-\s]*[Pp]age\s+\d+\s*(of\s+\d+)?[\-\s]*$"),
     re.compile(r"(?m)^\s*\d+\s*\|\s*[Pp]\s*a\s*g\s*e\s*$"),
     re.compile(r"(?m)^\s*-\s*\d+\s*-\s*$"),
     # Running headers/footers — detect lines that repeat > 3 times across the doc
@@ -116,20 +130,72 @@ class DocumentPreprocessor:
     # Public API
     # ------------------------------------------------------------------
 
+    async def apreprocess(self, documents: List[Document]) -> List[Document]:
+        """Asynchronously apply all cleaning steps to each document in the list."""
+        logger.debug("[preprocessor] apreprocess called for %d document(s)", len(documents))
+        return await asyncio.to_thread(self.preprocess, documents)
+
+    async def apreprocess_stream(
+        self, documents: List[Document]
+    ) -> AsyncIterator[Document]:
+        """
+        Async generator - yields cleaned documents one at a time.
+
+        Use this instead of ``apreprocess`` when the caller wants to start
+        downstream work (e.g. indexing) before the entire batch is cleaned,
+        or when the batch is very large and holding the full list in memory
+        is undesirable.
+        """
+        for doc in documents:
+            cleaned = await asyncio.to_thread(self._clean_single, doc)
+            yield cleaned
+
     def preprocess(self, documents: List[Document]) -> List[Document]:
         """
         Apply all cleaning steps to each document in the list.
         Returns the same list (documents mutated in-place for memory efficiency).
+
+        Metadata (page_number, sections, source_type ...) is never touched.
         """
         for doc in documents:
-            text = doc.get_content()
-            text = self._fix_encoding(text)
-            text = self._remove_boilerplate(text)
-            if self.enable_coref and self._nlp is not None:
-                text = self._resolve_coreferences(text)
-            text = self._normalize_whitespace(text)
-            doc.set_content(text)
+            self._clean_single(doc)
         return documents
+
+    def preprocess_batch(
+        self,
+        documents: List[Document],
+        batch_size: int = 32,
+    ) -> Iterator[List[Document]]:
+        """
+        Yield cleaned documents in batches of *batch_size*.
+
+        Useful for pipelines that want to stream documents through a
+        load -> clean -> index cycle without materialising the full corpus.
+        """
+        for i in range(0, len(documents), batch_size):
+            batch = documents[i : i + batch_size]
+            self.preprocess(batch)
+            yield batch
+
+    # ------------------------------------------------------------------
+    # Internal: single-document cleaning
+    # ------------------------------------------------------------------
+
+    def _clean_single(self, doc: Document) -> Document:
+        """
+        Run the full cleaning pipeline on a single Document *in-place*.
+        Only ``doc.get_content()`` / ``doc.set_content()`` are used;
+        metadata is never read or modified.
+        """
+        text = doc.get_content()
+        text = self._fix_encoding(text)
+        text = self._normalize_text(text)
+        text = self._remove_boilerplate(text)
+        if self.enable_coref and self._nlp is not None:
+            text = self._resolve_coreferences(text)
+        text = self._normalize_whitespace(text)
+        doc.set_content(text)
+        return doc
 
     # ------------------------------------------------------------------
     # Step 1 — Encoding & Unicode normalization
@@ -145,6 +211,32 @@ class DocumentPreprocessor:
 
         if _HAS_FTFY:
             text = ftfy.fix_text(text)
+
+        return text
+
+    # ------------------------------------------------------------------
+    # Step 2 — PDF/OCR artifact cleaning
+    # ------------------------------------------------------------------
+
+    def _normalize_text(self, text: str) -> str:
+        """
+        Fix common PDF extraction and OCR artifacts.
+        """
+        # 1. Fix soft hyphens and broken words at line breaks
+        # (e.g., "en- \nvironment" -> "environment")
+        text = re.sub(r"(\w+)-\s*\n\s*(\w+)", r"\1\2", text)
+
+        # 2. Fix spaced-out words (common in some PDF layouts/OCR)
+        # (e.g., "T h e  r e s u l t" -> "The result")
+        # Heuristic: if we see 3+ characters separated by single spaces, join them.
+        def _join_spaced_words(match):
+            return match.group(0).replace(" ", "")
+        
+        text = re.sub(r"\b([A-Za-z] ){2,}[A-Za-z]\b", _join_spaced_words, text)
+
+        # 3. Normalize punctuation
+        text = text.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
+        text = text.replace("…", "...").replace("–", "-").replace("—", "--")
 
         return text
 

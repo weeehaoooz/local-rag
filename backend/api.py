@@ -12,8 +12,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Literal
 
-# ── Global engine reference ───────────────────────────────────────────
+from indexers.ingest_manager import AsyncIngestionManager
+
+# ── Global references ─────────────────────────────────────────────────
 _engine = None
+_ingest_manager: AsyncIngestionManager | None = None
 
 
 def _get_engine():
@@ -28,10 +31,25 @@ def _get_engine():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle."""
+    global _ingest_manager
+
     # Startup: pre-warm the engine
     _get_engine()
+
+    # Startup: launch the background ingestion manager
+    _ingest_manager = AsyncIngestionManager(
+        data_dir=os.getenv("INGEST_DATA_DIR", "./data"),
+        storage_dir=os.getenv("INGEST_STORAGE_DIR", "./storage"),
+        max_workers=int(os.getenv("INGEST_MAX_WORKERS", "2")),
+        scan_interval_seconds=float(os.getenv("INGEST_SCAN_INTERVAL", "0")),
+    )
+    await _ingest_manager.start()
+
     yield
-    # Shutdown: clean up
+
+    # Shutdown: stop ingestion manager then engine
+    if _ingest_manager is not None:
+        await _ingest_manager.stop()
     if _engine is not None:
         _engine.close()
 
@@ -159,6 +177,25 @@ def generate_title(req: TitleRequest):
     except Exception as e:
         print(f"Title generation failed: {e}")
         return TitleResponse(title=req.first_message[:40] + ("..." if len(req.first_message) > 40 else ""))
+
+
+# ── Ingestion Routes ───────────────────────────────────────────────────
+
+@app.get("/api/ingest/status")
+def ingest_status():
+    """Return the current ingestion pipeline status."""
+    if _ingest_manager is None:
+        raise HTTPException(status_code=503, detail="Ingestion manager not initialised.")
+    return _ingest_manager.status()
+
+
+@app.post("/api/ingest/trigger")
+async def ingest_trigger():
+    """Manually trigger a scan of the data directory for new/changed files."""
+    if _ingest_manager is None:
+        raise HTTPException(status_code=503, detail="Ingestion manager not initialised.")
+    queued = await _ingest_manager.trigger_scan()
+    return {"queued": queued, "status": _ingest_manager.status()}
 
 
 # ── Entrypoint ────────────────────────────────────────────────────────

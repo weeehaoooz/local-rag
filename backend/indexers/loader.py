@@ -17,16 +17,36 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import List
+import io
+import re
+import asyncio
+from typing import List, Optional, Any
 
 from llama_index.core import SimpleDirectoryReader
 from llama_index.core.schema import Document
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Optional dependency guards
 # ---------------------------------------------------------------------------
+
+try:
+    import easyocr  # type: ignore
+    _HAS_EASYOCR = True
+except ImportError:
+    _HAS_EASYOCR = False
+    logger.warning(
+        "[loader] 'easyocr' not installed — OCR disabled. "
+        "Install with: pip install easyocr"
+    )
+
+try:
+    from PIL import Image  # type: ignore
+    _HAS_PILLOW = True
+except ImportError:
+    _HAS_PILLOW = False
 
 try:
     import pdfplumber  # type: ignore
@@ -80,6 +100,47 @@ def _table_to_markdown(table: list[list]) -> str:
     return "\n".join(rows)
 
 
+# OCR Reader (Singleton/Lazy)
+_OCR_READER: Optional[easyocr.Reader] = None
+
+def _get_ocr_reader() -> easyocr.Reader:
+    global _OCR_READER
+    if _OCR_READER is None:
+        if not _HAS_EASYOCR:
+            raise ImportError("easyocr is not installed.")
+        logger.info("[loader] Initializing easyocr Reader (English)...")
+        # gpu=False for local CPU stability; set True if user has Mac GPU/CUDA
+        _OCR_READER = easyocr.Reader(['en'], gpu=False)
+    return _OCR_READER
+
+
+# ---------------------------------------------------------------------------
+# Section detection helper
+# ---------------------------------------------------------------------------
+
+_SECTION_HEADING_RE = re.compile(
+    r"(?m)^(?:#{1,3}\s+(.+))$"        # Markdown headings: # Title, ## Section
+    r"|"
+    r"^([A-Z][A-Z\s]{4,60})$"         # ALL-CAPS lines (common in PDFs)
+)
+
+
+def _detect_sections(text: str) -> list[str]:
+    """
+    Extract section headings from text.
+
+    Recognises:
+      - Markdown headings (# / ## / ###)
+      - ALL-CAPS lines that look like section titles
+    """
+    sections: list[str] = []
+    for match in _SECTION_HEADING_RE.finditer(text):
+        heading = (match.group(1) or match.group(2) or "").strip()
+        if heading and heading not in sections:
+            sections.append(heading)
+    return sections
+
+
 # ---------------------------------------------------------------------------
 # PDF loader
 # ---------------------------------------------------------------------------
@@ -93,12 +154,18 @@ def _load_pdf_with_pdfplumber(file_path: str, metadata: dict) -> List[Document]:
       within each page.  This prevents multi-column text from being interleaved.
     - Table-to-Markdown: detected tables are embedded as Markdown blocks so the
       LLM can understand row/column relationships during triplet extraction.
+    - OCR Fallback: if a page appears to be a scan (little or no text), converts
+      the page to an image and runs easyocr.
+    - Per-page Documents: emits one Document per page with rich metadata.
     """
-    pages_text: list[str] = []
+    documents: list[Document] = []
 
     with pdfplumber.open(file_path) as pdf:
+        total_pages = len(pdf.pages)
+
         for page_num, page in enumerate(pdf.pages, start=1):
             page_parts: list[str] = []
+            used_ocr = False
 
             # 1. Extract tables first and note their bounding boxes
             table_bboxes: list[tuple] = []
@@ -113,8 +180,6 @@ def _load_pdf_with_pdfplumber(file_path: str, metadata: dict) -> List[Document]:
             table_bboxes = [tbl.bbox for tbl in raw_tables]
 
             # 2. Extract text outside table bounding boxes
-            # Crop the page to exclude table areas, then extract words sorted
-            # by reading order (top→bottom, then left→right within each y-band).
             words = page.extract_words(
                 x_tolerance=3,
                 y_tolerance=3,
@@ -133,24 +198,53 @@ def _load_pdf_with_pdfplumber(file_path: str, metadata: dict) -> List[Document]:
 
             non_table_words = [w for w in words if not _in_table(w)]
 
-            # Re-assemble text in reading order using y-band clustering
+            # Re-assemble text in reading order
             page_body = _words_to_reading_order_text(non_table_words, page.width)
+
+            # 3. OCR Fallback for scanned pages
+            # If we got very little text (< 50 chars) and no tables, check if it's an image
+            if len(page_body.strip()) < 50 and not page_parts and _HAS_EASYOCR:
+                logger.info("[loader] Low text on page %d of '%s'; attempting OCR...", page_num, os.path.basename(file_path))
+                try:
+                    # Render page to image for OCR
+                    img = page.to_image(resolution=300).original
+                    # Convert PIL Image to bytes for easyocr
+                    img_byte_arr = io.BytesIO()
+                    img.save(img_byte_arr, format='PNG')
+                    img_bytes = img_byte_arr.getvalue()
+
+                    reader = _get_ocr_reader()
+                    ocr_results = reader.readtext(img_bytes, detail=0, paragraph=True)
+                    ocr_text = "\n".join(ocr_results)
+                    if ocr_text.strip():
+                        page_parts.append(f"[OCR Content]\n{ocr_text}")
+                        used_ocr = True
+                except Exception as e:
+                    logger.warning("[loader] OCR failed for page %d: %s", page_num, e)
+
             if page_body.strip():
-                page_parts.insert(0, page_body)  # Body before tables (natural order)
+                page_parts.insert(0, page_body)
 
-            if page_parts:
-                pages_text.append(f"[Page {page_num}]\n" + "\n".join(page_parts))
+            page_text = f"[Page {page_num}]\n" + "\n".join(page_parts)
 
-    full_text = "\n\n".join(pages_text)
-    if not full_text.strip():
-        # Fallback: plain text extraction if layout extraction yields nothing
-        logger.warning("[loader] PDF layout extraction empty for '%s'; falling back to plain text.", file_path)
-        with pdfplumber.open(file_path) as pdf:
-            full_text = "\n\n".join(
-                page.extract_text() or "" for page in pdf.pages
-            )
+            # Detect section headers within the page text
+            sections = _detect_sections(page_text)
 
-    return [Document(text=full_text, metadata={**metadata, "file_path": file_path})]
+            page_metadata = {
+                **metadata,
+                "file_path": file_path,
+                "source_type": "pdf",
+                "page_number": page_num,
+                "total_pages": total_pages,
+                "has_tables": len(raw_tables) > 0,
+                "used_ocr": used_ocr,
+            }
+            if sections:
+                page_metadata["sections"] = sections
+
+            documents.append(Document(text=page_text, metadata=page_metadata))
+
+    return documents
 
 
 def _words_to_reading_order_text(words: list[dict], page_width: float) -> str:
@@ -203,6 +297,8 @@ def _load_docx_with_python_docx(file_path: str, metadata: dict) -> List[Document
     """
     doc_obj = docx.Document(file_path)
     parts: list[str] = []
+    detected_sections: list[str] = []
+    has_tables = False
 
     for block in doc_obj.element.body:
         tag = block.tag.split("}")[-1] if "}" in block.tag else block.tag
@@ -219,10 +315,13 @@ def _load_docx_with_python_docx(file_path: str, metadata: dict) -> List[Document
 
             if "Heading 1" in style_name:
                 parts.append(f"# {text}")
+                detected_sections.append(text)
             elif "Heading 2" in style_name:
                 parts.append(f"## {text}")
+                detected_sections.append(text)
             elif "Heading 3" in style_name:
                 parts.append(f"### {text}")
+                detected_sections.append(text)
             else:
                 parts.append(text)
 
@@ -235,9 +334,19 @@ def _load_docx_with_python_docx(file_path: str, metadata: dict) -> List[Document
             md = _table_to_markdown(rows)
             if md:
                 parts.append(f"\n[TABLE]\n{md}\n[/TABLE]\n")
+                has_tables = True
 
     full_text = "\n\n".join(parts)
-    return [Document(text=full_text, metadata={**metadata, "file_path": file_path})]
+    doc_metadata = {
+        **metadata,
+        "file_path": file_path,
+        "source_type": "docx",
+        "has_tables": has_tables,
+    }
+    if detected_sections:
+        doc_metadata["sections"] = detected_sections
+
+    return [Document(text=full_text, metadata=doc_metadata)]
 
 
 def _find_paragraph(doc_obj, elem):
@@ -278,7 +387,56 @@ def _load_html(file_path: str, metadata: dict) -> List[Document]:
     main = soup.find("main") or soup.find("article") or soup.find("body") or soup
     text = main.get_text(separator="\n")
 
-    return [Document(text=text, metadata={**metadata, "file_path": file_path})]
+    # Extract heading structure for section metadata
+    heading_tags = main.find_all(["h1", "h2", "h3"]) if main else []
+    sections = [h.get_text(strip=True) for h in heading_tags if h.get_text(strip=True)]
+
+    # Extract page title
+    title_tag = soup.find("title")
+    page_title = title_tag.get_text(strip=True) if title_tag else None
+
+    doc_metadata = {
+        **metadata,
+        "file_path": file_path,
+        "source_type": "html",
+    }
+    if sections:
+        doc_metadata["sections"] = sections
+    if page_title:
+        doc_metadata["html_title"] = page_title
+
+    return [Document(text=text, metadata=doc_metadata)]
+
+
+# ---------------------------------------------------------------------------
+# Image loader
+# ---------------------------------------------------------------------------
+
+def _load_image_with_ocr(file_path: str, metadata: dict) -> List[Document]:
+    """Extract text from an image using easyocr."""
+    if not _HAS_EASYOCR:
+        return SimpleDirectoryReader(input_files=[file_path]).load_data()
+
+    logger.debug("[loader] Running OCR on image: %s", file_path)
+    try:
+        reader = _get_ocr_reader()
+        results = reader.readtext(file_path, detail=0, paragraph=True)
+        text = "\n".join(results)
+
+        # Add a placeholder page marker for consistency
+        text = "[Page 1]\n" + text
+
+        return [Document(text=text, metadata={
+            **metadata,
+            "file_path": file_path,
+            "source_type": "image",
+            "used_ocr": True,
+            "page_number": 1,
+            "total_pages": 1,
+        })]
+    except Exception as e:
+        logger.warning("[loader] Image OCR failed for '%s': %s", file_path, e)
+        return SimpleDirectoryReader(input_files=[file_path]).load_data()
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +451,11 @@ _EXTENSION_MAP = {
     ".htm": "html",
     ".txt": "txt",
     ".md": "txt",
+    ".png": "img",
+    ".jpg": "img",
+    ".jpeg": "img",
+    ".bmp": "img",
+    ".tiff": "img",
 }
 
 
@@ -312,6 +475,12 @@ class SmartDocumentLoader:
         loader = SmartDocumentLoader()
         documents = loader.load(file_path)
     """
+
+    async def aload(self, file_path: str) -> List[Document]:
+        """Asynchronously load a single file into a list of LlamaIndex Documents."""
+        logger.debug("[loader] aload called for '%s'", file_path)
+        # Offload blocking parsing to a thread pool for true async scalability
+        return await asyncio.to_thread(self.load, file_path)
 
     def load(self, file_path: str) -> List[Document]:
         """Load a single file and return a list of LlamaIndex Documents."""
@@ -335,6 +504,10 @@ class SmartDocumentLoader:
                 logger.debug("[loader] Loading HTML with BeautifulSoup: %s", file_path)
                 return _load_html(file_path, base_metadata)
 
+            if fmt == "img" and _HAS_EASYOCR:
+                logger.debug("[loader] Loading Image with easyocr: %s", file_path)
+                return _load_image_with_ocr(file_path, base_metadata)
+
         except Exception as exc:
             logger.warning(
                 "[loader] Smart loader failed for '%s' (%s). Falling back to SimpleDirectoryReader. Error: %s",
@@ -345,4 +518,8 @@ class SmartDocumentLoader:
 
         # Default: SimpleDirectoryReader (TXT, unknown, or fallback)
         logger.debug("[loader] Loading with SimpleDirectoryReader: %s", file_path)
-        return SimpleDirectoryReader(input_files=[file_path]).load_data()
+        docs = SimpleDirectoryReader(input_files=[file_path]).load_data()
+        # Ensure fallback documents still carry source_type metadata
+        for doc in docs:
+            doc.metadata.setdefault("source_type", fmt if fmt != "unknown" else "txt")
+        return docs

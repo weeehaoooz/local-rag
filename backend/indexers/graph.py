@@ -254,30 +254,67 @@ _SECTION_HEADING_RE = re.compile(
     re.MULTILINE,
 )
 
+_PAGE_MARKER_RE = re.compile(r"\[Page (\d+)\]")
 
-def _split_by_sections(text: str) -> List[str]:
-    """
-    Split *text* at section-heading boundaries detected by ``_SECTION_HEADING_RE``.
-    Returns a list of section strings (heading included at the start of each section).
-    If no headings are found, returns ``[text]`` unchanged.
-    """
-    matches = list(_SECTION_HEADING_RE.finditer(text))
-    if not matches:
-        return [text]
 
-    sections: List[str] = []
+def _split_by_sections(text: str) -> List[Dict[str, Any]]:
+    """
+    Split *text* at section-heading boundaries.
+    Returns a list of dicts: {"text": str, "section": str, "page": int}
+    """
+    # 1. Identify all page markers
+    page_markers = list(_PAGE_MARKER_RE.finditer(text))
+    
+    # 2. Identify all section markers
+    section_markers = list(_SECTION_HEADING_RE.finditer(text))
+    
+    # Combine and sort markers by position
+    all_markers = []
+    for m in page_markers:
+        all_markers.append({"pos": m.start(), "end": m.end(), "type": "page", "val": int(m.group(1))})
+    for m in section_markers:
+        # Extract title: remove markdown prefix or just strip
+        title = m.group(0).lstrip("# ").strip()
+        all_markers.append({"pos": m.start(), "end": m.end(), "type": "section", "val": title})
+    
+    all_markers.sort(key=lambda x: x["pos"])
+    
+    if not all_markers:
+        return [{"text": text, "section": "Preamble", "page": 1}]
+
+    results: List[Dict[str, Any]] = []
+    current_page = 1
+    current_section = "Preamble"
     prev_end = 0
-    for match in matches:
-        # Content before the first heading (preamble)
-        if match.start() > prev_end:
-            preamble = text[prev_end : match.start()].strip()
-            if preamble:
-                sections.append(preamble)
-        prev_end = match.start()
-
-    # Last section goes to the end of the text
-    sections.append(text[prev_end:].strip())
-    return [s for s in sections if s]
+    
+    for marker in all_markers:
+        # Segment before this marker
+        segment_text = text[prev_end : marker["pos"]].strip()
+        if segment_text:
+            results.append({
+                "text": segment_text,
+                "section": current_section,
+                "page": current_page
+            })
+        
+        # Update state based on marker
+        if marker["type"] == "page":
+            current_page = marker["val"]
+        else:
+            current_section = marker["val"]
+            
+        prev_end = marker["end"]
+        
+    # Final segment
+    final_text = text[prev_end:].strip()
+    if final_text:
+        results.append({
+            "text": final_text,
+            "section": current_section,
+            "page": current_page
+        })
+        
+    return results
 
 
 def _agentic_find_split(text: str, llm, window: int = 2000) -> int:
@@ -375,39 +412,47 @@ def _small_to_big_parse(
 
     for doc in documents:
         # ----------------------------------------------------------------
-        # 1. Recursive section splitting
+        # 1. Recursive section & page splitting
         # ----------------------------------------------------------------
         sections = _split_by_sections(doc.get_content())
         print(
             f"     [chunking] '{doc.metadata.get('file_name', '?')}': "
-            f"{len(sections)} section(s) detected.",
+            f"{len(sections)} structural segment(s) detected.",
             flush=True,
         )
 
         section_docs: List[Document] = []
-        for section_text in sections:
+        for sec in sections:
+            sec_text = sec["text"]
+            sec_metadata = {
+                **doc.metadata,
+                "page_number": sec["page"],
+                "section_title": sec["section"]
+            }
+            
             # Agentic refinement for long sections
-            if agentic_chunk and _llm and len(section_text) > big_chunk_size * 4:
+            if agentic_chunk and _llm and len(sec_text) > big_chunk_size * 4:
                 print(
                     f"     [agentic_chunk] Running LLM split-point detection on a "
-                    f"{len(section_text)}-char section...",
+                    f"{len(sec_text)}-char segment...",
                     flush=True,
                 )
-                split_idx = _agentic_find_split(section_text, _llm)
-                left, right = section_text[:split_idx].strip(), section_text[split_idx:].strip()
+                split_idx = _agentic_find_split(sec_text, _llm)
+                left, right = sec_text[:split_idx].strip(), sec_text[split_idx:].strip()
                 for part in [left, right]:
                     if part:
                         section_docs.append(
-                            Document(text=part, metadata=doc.metadata)
+                            Document(text=part, metadata=sec_metadata)
                         )
             else:
                 section_docs.append(
-                    Document(text=section_text, metadata=doc.metadata)
+                    Document(text=sec_text, metadata=sec_metadata)
                 )
 
         # ----------------------------------------------------------------
         # 2. SentenceSplitter for oversized sections → big (parent) nodes
         # ----------------------------------------------------------------
+        # Ensure metadata is preserved through splitting
         parent_chunks = big_splitter.get_nodes_from_documents(section_docs)
         for parent in parent_chunks:
             big_nodes.append(parent)
@@ -422,8 +467,10 @@ def _small_to_big_parse(
                 if not child.node_id:
                     import uuid
                     child.id_ = str(uuid.uuid4())
-                # Clear relationships with null node_id to prevent
-                # ImplicitPathExtractor from creating Relations with null ids.
+                
+                # Metadata already contains page_number and section_title from parent.metadata
+                
+                # Clear relationships with null node_id
                 for rel_type in (
                     NodeRelationship.SOURCE,
                     NodeRelationship.NEXT,

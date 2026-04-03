@@ -17,6 +17,7 @@ from indexers import (
     GuardrailManager, _derive_category, _derive_title,
     SmartDocumentLoader, DocumentPreprocessor,
 )
+from indexers.progress import create_progress_handler
 
 # Load environment variables
 load_dotenv()
@@ -65,6 +66,7 @@ def run_indexing(force: bool = False, clean: bool = False, num_passes: int = 1, 
     guardrail_mgr = GuardrailManager()
     loader = SmartDocumentLoader()
     preprocessor = DocumentPreprocessor()
+    progress_handler = create_progress_handler()
 
     # ----------------------------------------------------------------
     # 1. Discover files & derive categories
@@ -75,6 +77,7 @@ def run_indexing(force: bool = False, clean: bool = False, num_passes: int = 1, 
         for file in files:
             if file.endswith((".txt", ".pdf")):
                 all_files.append(os.path.join(root, file))
+    progress_handler.clear()
 
     if not all_files:
         print("No files found in ./data")
@@ -82,15 +85,19 @@ def run_indexing(force: bool = False, clean: bool = False, num_passes: int = 1, 
 
     # Group files by category
     files_by_category: dict[str, list[str]] = defaultdict(list)
-    for f in all_files:
+    for idx, f in enumerate(all_files, 1):
         cat = _derive_category(f, "./data")
         files_by_category[cat].append(f)
+        progress_handler.update(idx, len(all_files), f"{cat}")
+    progress_handler.end()
 
     # ----------------------------------------------------------------
     # 2. Generate per-file summaries, then derive guardrails per category
     # ----------------------------------------------------------------
     print(f"Found {len(files_by_category)} category(ies): {', '.join(files_by_category.keys())}")
+    progress_handler.clear()
 
+    # Process guardrails per category
     for category, cat_files in files_by_category.items():
         existing_guardrails = guardrail_mgr.get_guardrails(category)
         if existing_guardrails is not None and not force:
@@ -112,7 +119,8 @@ def run_indexing(force: bool = False, clean: bool = False, num_passes: int = 1, 
             docs = preprocessor.preprocess(docs)
             summary = guardrail_mgr.ensure_document_summary(f, docs, force=force)
             category_summaries.append(summary)
-            print(f"     Summarised: {os.path.basename(f)}")
+            progress_handler.update(sample_files.index(f) + 1, len(sample_files), f"Summarised: {os.path.basename(f)}")
+        progress_handler.end()
 
         # Step 2b – use summaries to generate the guardrail schema.
         # Load raw docs as a fallback only (passed for backward-compat signature).
@@ -172,11 +180,12 @@ def run_indexing(force: bool = False, clean: bool = False, num_passes: int = 1, 
 
         for category, files in dirty_by_cat.items():
             print(f"  -> Processing Category: [{category}] ({len(files)} files)")
+            progress_handler.clear()
 
             similar_cats = guardrail_mgr.get_similar_categories(category)
             guardrails = guardrail_mgr.get_guardrails(category)
 
-            for f in files:
+            for idx, f in enumerate(files, 1):
                 print(f"    -> Indexing file: {f}")
                 documents = loader.load(f)
                 documents = preprocessor.preprocess(documents)
@@ -187,6 +196,7 @@ def run_indexing(force: bool = False, clean: bool = False, num_passes: int = 1, 
                 doc_summary = guardrail_mgr.ensure_document_summary(
                     f, documents, force=force
                 )
+                progress_handler.update(idx, len(files), f"Summary: {os.path.basename(f)}")
 
                 title = _derive_title(f)
                 kg_prefix = guardrail_mgr.build_kg_prompt_prefix(
@@ -216,6 +226,7 @@ def run_indexing(force: bool = False, clean: bool = False, num_passes: int = 1, 
                     agentic_chunk=agentic_chunk,
                 )
                 tracker.update_file_hash(f)
+            progress_handler.end()
 
     # ----------------------------------------------------------------
     # 6. Regenerate KG for files whose guardrails changed

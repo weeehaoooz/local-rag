@@ -13,6 +13,8 @@ spacy               # NLP for heuristic coreference resolution
 python-docx         # DOCX layout-aware loading
 beautifulsoup4      # HTML boilerplate stripping
 lxml                # Parser backend for BeautifulSoup
+easyocr             # Local OCR for images and scanned PDFs
+Pillow              # Image handling for OCR
 
 # --- Graph Cleaning & Community Detection ---
 numpy               # Vectorized cosine similarity for graph cleaning

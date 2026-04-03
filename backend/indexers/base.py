@@ -12,6 +12,11 @@ class BaseIndexer(abc.ABC):
     def index_documents(self, documents: List[Document]) -> Any:
         """Index a list of documents."""
         pass
+    
+    @abc.abstractmethod
+    async def aindex_documents(self, documents: List[Document]) -> Any:
+        """Asynchronously index a list of documents."""
+        pass
 
     @abc.abstractmethod
     def persist(self, persist_dir: str):

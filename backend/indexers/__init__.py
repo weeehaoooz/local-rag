@@ -7,9 +7,11 @@ from indexers.guardrails import GuardrailManager, _derive_category, _derive_titl
 from indexers.loader import SmartDocumentLoader
 from indexers.preprocessor import DocumentPreprocessor
 from indexers.community import CommunitySummarizer
+from indexers.ingest_manager import AsyncIngestionManager
 
 __all__ = [
     "BaseIndexer", "VectorIndexer", "SummaryIndexer", "GraphIndexer",
     "IndexingTracker", "GuardrailManager", "_derive_category", "_derive_title",
     "SmartDocumentLoader", "DocumentPreprocessor", "CommunitySummarizer",
+    "AsyncIngestionManager",
 ]
