@@ -83,7 +83,7 @@ class RichProgressHandler(Generic[T]):
 
     def update(self, current: int, total: int, message: str) -> None:
         """Update a specific progress item."""
-        if not self.current_progress.is_active and self.progress:
+        if getattr(self.current_progress, "is_active", True) is False and self.progress:
             # Remove any finished progress bars
             self.progress = [p for p in self.progress if p.is_active]
             self.current_progress = None

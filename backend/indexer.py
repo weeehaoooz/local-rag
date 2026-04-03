@@ -13,7 +13,7 @@ from llama_index.embeddings.ollama import OllamaEmbedding
 nest_asyncio.apply()
 
 from indexers import (
-    VectorIndexer, SummaryIndexer, GraphIndexer, IndexingTracker,
+    VectorIndexer, BM25Indexer, SummaryIndexer, GraphIndexer, IndexingTracker,
     GuardrailManager, _derive_category, _derive_title,
     SmartDocumentLoader, DocumentPreprocessor,
 )
@@ -162,10 +162,12 @@ def run_indexing(force: bool = False, clean: bool = False, num_passes: int = 1, 
     # 4. Initialize indexers
     # ----------------------------------------------------------------
     vector_indexer = VectorIndexer()
+    bm25_indexer = BM25Indexer()
     summary_indexer = SummaryIndexer()
     graph_indexer = GraphIndexer(storage_context)
 
     vector_indexer.load("./storage/vector")
+    bm25_indexer.load("./storage/bm25")
     summary_indexer.load("./storage/summary")
 
     # ----------------------------------------------------------------
@@ -212,6 +214,7 @@ def run_indexing(force: bool = False, clean: bool = False, num_passes: int = 1, 
                     doc.set_content(f"Document Title: {title}\n\n{doc.get_content()}")
 
                 vector_indexer.index_documents(documents)
+                bm25_indexer.index_documents(documents, title=title)
                 summary_indexer.index_documents(documents)
                 graph_indexer.index_documents(
                     documents,
@@ -289,6 +292,7 @@ def run_indexing(force: bool = False, clean: bool = False, num_passes: int = 1, 
             tracker.update_guardrail_hash(category, gr_hash)
 
     vector_indexer.persist("./storage/vector")
+    bm25_indexer.persist("./storage/bm25")
     summary_indexer.persist("./storage/summary")
     tracker.save_state()
 

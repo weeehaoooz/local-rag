@@ -579,6 +579,10 @@ class GraphIndexer(BaseIndexer):
     # PUBLIC: Synchronous wrapper
     # ------------------------------------------------------------------
 
+    async def aindex_documents(self, documents: List[Document], **kwargs) -> Any:
+        """Async variant — delegates to the sync path."""
+        return self.index_documents(documents, **kwargs)
+
     def index_documents(
         self,
         documents: List[Document],
@@ -800,7 +804,177 @@ class GraphIndexer(BaseIndexer):
         self._apply_entity_labels(category)
         self._apply_category_node(category)
 
+        # 7. Hybrid Graph Enhancements: Explicit Mentions and Semantic Edges
+        self._link_chunks_to_entities()
+        self._create_semantic_edges(small_nodes)
+
         return self.index
+
+    # ------------------------------------------------------------------
+    # Hybrid Graph Post-processing Helpers
+    # ------------------------------------------------------------------
+
+    def _link_chunks_to_entities(self):
+        """
+        Ensure explicit MENTIONS relationships between Chunks and Entities.
+        LlamaIndex creates SOURCE relationships, but this makes it explicit for our Hybrid traversal.
+        """
+        if not isinstance(self.storage_context.property_graph_store, Neo4jPropertyGraphStore):
+            return
+            
+        print("  -> Creating MENTIONS edges between Chunks and Entities...")
+        # LlamaIndex usually connects __Node__ and __Entity__ with a SOURCE relationship
+        query = """
+        MATCH (c:__Node__)-[:SOURCE]-(e:__Entity__)
+        MERGE (c)-[:MENTIONS]->(e)
+        """
+        try:
+            self.storage_context.property_graph_store.structured_query(query)
+            print("     ✓ MENTIONS edges created.")
+        except Exception as e:
+            print(f"     Warning: Failed to create MENTIONS edges: {e}")
+
+    def _create_semantic_edges(self, new_nodes: List[TextNode], top_k: int = 3):
+        """
+        Calculates embeddings for the chunks and creates SIMILAR_TO edges
+        to the most semantically similar existing chunks in the graph.
+        """
+        if not isinstance(self.storage_context.property_graph_store, Neo4jPropertyGraphStore):
+            return
+            
+        if not Settings.embed_model:
+            print("  -> Skipping SIMILAR_TO edges (no embed_model configured).")
+            return
+            
+        print(f"  -> Creating SIMILAR_TO semantic edges (top_k={top_k})...")
+        
+        # 1. Fetch all chunks and their stored embeddings (if any)
+        query = """
+        MATCH (c:__Node__) 
+        WHERE c.text IS NOT NULL AND c.id IS NOT NULL 
+        RETURN c.id AS id, c.text AS text, c.embedding AS embedding
+        """
+        results = self.storage_context.property_graph_store.structured_query(query)
+        
+        all_chunks = []
+        if isinstance(results, list):
+            for r in results:
+                if isinstance(r, dict):
+                    all_chunks.append({
+                        "id": r.get("id"), 
+                        "text": r.get("text"), 
+                        "embedding": r.get("embedding")
+                    })
+                elif hasattr(r, "values"):
+                    vals = list(r.values())
+                    if len(vals) >= 2:
+                        all_chunks.append({
+                            "id": vals[0], 
+                            "text": vals[1],
+                            "embedding": vals[2] if len(vals) > 2 else None
+                        })
+                        
+        if len(all_chunks) < 2:
+            print("     Not enough chunks to create semantic edges.")
+            return
+
+        # 2. Compute missing embeddings
+        import numpy as np
+        
+        # Track which chunks need updating in Neo4j
+        chunks_to_update = []
+        for chunk in all_chunks:
+            if chunk["embedding"] is None:
+                try:
+                    emb = Settings.embed_model.get_text_embedding(chunk["text"])
+                    chunk["embedding"] = emb
+                    chunks_to_update.append({"id": chunk["id"], "embedding": emb})
+                except Exception as e:
+                    print(f"     Warning: Failed to embed chunk {chunk['id']}: {e}")
+                    chunk["embedding"] = [0.0] * 768  # Dummy to prevent crash
+        
+        # Optional: Save embeddings back to Neo4j to save time on future runs
+        if chunks_to_update:
+            print(f"     Saving embeddings for {len(chunks_to_update)} chunk(s)...")
+            # Batch update in Neo4j
+            update_query = """
+            UNWIND $updates AS update
+            MATCH (c:__Node__) WHERE c.id = update.id
+            SET c.embedding = update.embedding
+            """
+            try:
+                # Chunk the updates to avoid query size limits
+                batch_size = 100
+                for i in range(0, len(chunks_to_update), batch_size):
+                    batch = chunks_to_update[i:i+batch_size]
+                    self.storage_context.property_graph_store.structured_query(
+                        update_query, param_map={"updates": batch}
+                    )
+            except Exception as e:
+                print(f"     Warning: Failed to save chunk embeddings: {e}")
+
+        # 3. Compute pairwise similarities only for new_nodes against all_chunks
+        new_ids = {n.id_ for n in new_nodes}
+        
+        # Filter all_chunks that have valid embeddings
+        valid_chunks = [c for c in all_chunks if c["embedding"] is not None and len(c["embedding"]) > 1]
+        if not valid_chunks:
+            return
+            
+        emb_matrix = np.array([c["embedding"] for c in valid_chunks])
+        norms = np.linalg.norm(emb_matrix, axis=1, keepdims=True)
+        norms[norms == 0] = 1e-10
+        normed_emb_matrix = emb_matrix / norms
+        
+        edges_to_create = []
+        
+        for idx, chunk in enumerate(valid_chunks):
+            if chunk["id"] not in new_ids:
+                # Only create top-k edges *from* the newly indexed nodes
+                continue
+                
+            chunk_emb = normed_emb_matrix[idx]
+            # Compute similarity against all chunks
+            similarities = normed_emb_matrix @ chunk_emb
+            
+            # Get top K + 1 (to exclude self-similarity)
+            top_indices = np.argsort(similarities)[-(top_k+1):][::-1]
+            
+            added_edges = 0
+            for target_idx in top_indices:
+                if target_idx == idx:
+                    continue  # Skip self
+                
+                sim_score = float(similarities[target_idx])
+                if sim_score > 0.5: # Basic similarity threshold
+                    edges_to_create.append({
+                        "source_id": chunk["id"],
+                        "target_id": valid_chunks[target_idx]["id"],
+                        "score": sim_score
+                    })
+                    added_edges += 1
+                
+                if added_edges >= top_k:
+                    break
+
+        if edges_to_create:
+            print(f"     Creating {len(edges_to_create)} SIMILAR_TO edges...")
+            edge_query = """
+            UNWIND $edges AS edge
+            MATCH (source:__Node__) WHERE source.id = edge.source_id
+            MATCH (target:__Node__) WHERE target.id = edge.target_id
+            MERGE (source)-[r:SIMILAR_TO]->(target)
+            SET r.score = edge.score
+            """
+            try:
+                batch_size = 200
+                for i in range(0, len(edges_to_create), batch_size):
+                    batch = edges_to_create[i:i+batch_size]
+                    self.storage_context.property_graph_store.structured_query(
+                        edge_query, param_map={"edges": batch}
+                    )
+            except Exception as e:
+                print(f"     Warning: Failed to create SIMILAR_TO edges: {e}")
 
     # ------------------------------------------------------------------
     # Post-processing helpers (unchanged from original)

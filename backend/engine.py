@@ -121,6 +121,19 @@ class HybridEngine:
             print(f"  ✗ Summary index not available: {e}")
             self.summary_index = None
 
+        # ── BM25 (Sparse Lexical) Retriever ───────────────────────────
+        self.bm25_retriever = None
+        try:
+            from llama_index.retrievers.bm25 import BM25Retriever
+            bm25_dir = "./storage/bm25"
+            if os.path.isdir(bm25_dir):
+                self.bm25_retriever = BM25Retriever.from_persist_dir(bm25_dir)
+                print("  ✓ BM25 index loaded")
+            else:
+                print("  ⓘ BM25 index not found (run indexer to build it)")
+        except Exception as e:
+            print(f"  ✗ BM25 index not available: {e}")
+
         print("HybridEngine ready.")
 
     # ──────────────────────────────────────────────────────────────────
@@ -428,17 +441,112 @@ class HybridEngine:
                 "Summarize the key themes in the documents",
             ]
 
+
     # ──────────────────────────────────────────────────────────────────
-    # Retrieval (refactored with QueryType routing)
+    # Hybrid Retrieval with RRF
     # ──────────────────────────────────────────────────────────────────
+
+    def _reciprocal_rank_fusion(self, list_of_ranked_lists, k=60) -> list:
+        """
+        Fuses multiple ranked lists using Reciprocal Rank Fusion (RRF).
+        list_of_ranked_lists is a list of lists of dictionaries. 
+        Each dictionary must have a unique 'id' or 'text' to identify the item.
+        """
+        rrf_scores = {}
+        item_map = {}
+        
+        for ranked_list in list_of_ranked_lists:
+            for rank, item in enumerate(ranked_list):
+                # Use 'id' if available, otherwise hash the text/title for deduplication
+                item_id = item.get("id", hash(item.get("text", "")))
+                
+                if item_id not in rrf_scores:
+                    rrf_scores[item_id] = 0.0
+                    item_map[item_id] = item
+                    
+                # RRF score formula: 1 / (k + rank)
+                rrf_scores[item_id] += 1.0 / (k + rank + 1)
+                
+        # Sort by RRF score descending
+        sorted_items = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
+        return [item_map[item_id] for item_id, _ in sorted_items]
+
+    def _hybrid_graph_traversal(self, seed_chunks: list[dict], max_nodes: int = 10) -> dict:
+        """
+        Uses the new Graph structure (MENTIONS & SIMILAR_TO) to find related context
+        starting from vector-retrieved seed chunks.
+        """
+        if not seed_chunks or not self.graph_store:
+            return {"chunks": [], "entities": []}
+
+        # Extract text/IDs from seeds
+        seed_texts = [s.get("text", "") for s in seed_chunks if s.get("text")]
+        
+        query = """
+        UNWIND $seed_texts AS text
+        MATCH (seed:__Node__) WHERE seed.text = text
+        
+        // 1. Get entities mentioned in these chunks
+        OPTIONAL MATCH (seed)-[:MENTIONS]->(e:__Entity__)
+        
+        // 2. Get semantically similar chunks
+        OPTIONAL MATCH (seed)-[sim:SIMILAR_TO]->(neighbor_chunk:__Node__)
+        
+        RETURN 
+            collect(DISTINCT {name: e.name, type: labels(e)[0], title: e.title}) AS entities,
+            collect(DISTINCT {text: neighbor_chunk.text, score: sim.score}) AS neighbor_chunks
+        """
+        
+        try:
+            results = self.graph_store.structured_query(query, param_map={"seed_texts": seed_texts})
+            
+            entities = []
+            neighbor_chunks = []
+            
+            if isinstance(results, list) and results:
+                record = results[0]
+                
+                # Parse entities
+                raw_entities = record.get("entities", [])
+                if hasattr(record, "values") and not isinstance(record, dict):
+                    raw_entities = record.values()[0] if len(record.values()) > 0 else []
+                    
+                for e in raw_entities:
+                    if isinstance(e, dict) and e.get("name"):
+                        # Format as expanded entities for _summarize_entity_context
+                        entities.append({
+                            "name": e.get("name"),
+                            "title": e.get("title", e.get("name")),
+                            "labels": [e.get("type", "Entity")],
+                            "rel_types": ["MENTIONS"],
+                            "is_expanded": True
+                        })
+                        
+                # Parse neighbor chunks
+                raw_neighbors = record.get("neighbor_chunks", [])
+                if hasattr(record, "values") and not isinstance(record, dict):
+                    raw_neighbors = record.values()[1] if len(record.values()) > 1 else []
+                    
+                for nc in raw_neighbors:
+                    if isinstance(nc, dict) and nc.get("text"):
+                        neighbor_chunks.append({
+                            "text": nc["text"],
+                            "source_title": "Semantic Neighbor"
+                        })
+
+            return {
+                "chunks": neighbor_chunks[:max_nodes], 
+                "entities": entities[:max_nodes*2]
+            }
+        except Exception as e:
+            print(f"  [Hybrid Traversal] Failed: {e}")
+            return {"chunks": [], "entities": []}
+
 
     def get_context(self, query: str) -> dict:
         """
-        Retrieve context from all available indexes, routed by QueryType.
-
-        LOCAL  → KG (+ N-hop) + Vector. Skip community.
-        GLOBAL → Community (top-5) + Summary. Minimal KG/Vector.
-        HYBRID → Full pipeline: KG + N-hop + Vector + Community + Summary.
+        Retrieve context from all available indexes, using RRF for fusion and 
+        hybrid graph traversal to expand context.
         """
         # Step 0: Classify the query
         query_type, entity_hints = self._classify_query(query)
@@ -446,82 +554,101 @@ class HybridEngine:
 
         all_sources = []
 
-        # Helper to get (text, source_title) from nodes
         def _get_context_with_sources(nodes):
             results = []
             for node in nodes:
-                meta = node.metadata if hasattr(node, "metadata") else {}
+                meta = getattr(node, "metadata", {})
                 if not meta and hasattr(node, "node"):
                     meta = getattr(node.node, "metadata", {})
-
                 title = meta.get("title", meta.get("file_name", ""))
                 file_path = meta.get("file_path", "")
                 if not title and file_path:
                     title = os.path.basename(file_path).rsplit(".", 1)[0]
-
-                results.append((node.text, title))
+                results.append({"text": node.text, "source": title, "metadata": meta})
             return results
 
-        # ── 1. Knowledge Graph retrieval ──────────────────────────────
-        graph_context = []
-        expanded_entities = []
-
-        if query_type in (QueryType.LOCAL, QueryType.HYBRID):
-            try:
-                kg_retriever = self.kg_index.as_retriever(include_text=True, similarity_top_k=5)
-                graph_nodes = kg_retriever.retrieve(query)
-                graph_context = _get_context_with_sources(graph_nodes)
-                all_sources.extend(self._extract_sources(graph_nodes))
-
-                # Collect entity names from KG results for N-hop expansion
-                kg_entity_names = []
-                for gn in graph_nodes:
-                    meta = gn.metadata if hasattr(gn, "metadata") else {}
-                    if not meta and hasattr(gn, "node"):
-                        meta = getattr(gn.node, "metadata", {})
-                    name = meta.get("title", meta.get("name", ""))
-                    if name:
-                        kg_entity_names.append(name)
-
-                # Merge entity hints from router with KG-retrieved entities
-                all_seeds = list(set(entity_hints + kg_entity_names))
-
-                # N-hop expansion
-                if all_seeds:
-                    expanded_entities = self._expand_graph_context(
-                        all_seeds, max_hops=2, limit=30
-                    )
-            except Exception as e:
-                print(f"  KG retrieval error: {e}")
-
-        elif query_type == QueryType.GLOBAL and entity_hints:
-            # Even for global queries, if the router found specific entities,
-            # do a targeted N-hop to ground the answer
-            expanded_entities = self._expand_graph_context(
-                entity_hints, max_hops=1, limit=15
-            )
-
-        # ── 2. Vector retrieval ───────────────────────────────────────
-        vector_context = []
+        # ── 1. Vector retrieval (Semantic Seeds) ──────────────────────
+        vector_candidates = []
         if self.vector_index and query_type in (QueryType.LOCAL, QueryType.HYBRID):
             try:
-                vector_nodes = self.vector_index.as_retriever(similarity_top_k=5).retrieve(query)
-                vector_context = _get_context_with_sources(vector_nodes)
+                vector_nodes = self.vector_index.as_retriever(similarity_top_k=10).retrieve(query)
+                vector_candidates = _get_context_with_sources(vector_nodes)
                 all_sources.extend(self._extract_sources(vector_nodes))
             except Exception as e:
                 print(f"  Vector retrieval error: {e}")
 
-        # ── 3. Summary retrieval ──────────────────────────────────────
+        # ── 1b. BM25 retrieval (Lexical Seeds) ────────────────────────
+        bm25_candidates = []
+        if self.bm25_retriever and query_type in (QueryType.LOCAL, QueryType.HYBRID):
+            try:
+                bm25_nodes = self.bm25_retriever.retrieve(query)
+                bm25_candidates = _get_context_with_sources(bm25_nodes)
+                all_sources.extend(self._extract_sources(bm25_nodes))
+                print(f"  [BM25] Retrieved {len(bm25_candidates)} candidates")
+            except Exception as e:
+                print(f"  BM25 retrieval error: {e}")
+
+        # ── 2. Knowledge Graph text retrieval ──────────────────────────
+        graph_candidates = []
+        expanded_entities = []
+        
+        if query_type in (QueryType.LOCAL, QueryType.HYBRID):
+            try:
+                kg_retriever = self.kg_index.as_retriever(include_text=True, similarity_top_k=10)
+                graph_nodes = kg_retriever.retrieve(query)
+                graph_candidates = _get_context_with_sources(graph_nodes)
+                all_sources.extend(self._extract_sources(graph_nodes))
+                
+                # Fetch N-hop for entity hints
+                kg_entity_names = []
+                for gn in graph_nodes:
+                    meta = getattr(gn, "metadata", getattr(getattr(gn, "node", None), "metadata", {}))
+                    if meta.get("name"):
+                        kg_entity_names.append(meta.get("name"))
+                
+                all_seeds = list(set(entity_hints + kg_entity_names))
+                if all_seeds:
+                    expanded_entities.extend(self._expand_graph_context(all_seeds, max_hops=1, limit=15))
+            except Exception as e:
+                print(f"  KG retrieval error: {e}")
+                
+        elif query_type == QueryType.GLOBAL and entity_hints:
+            expanded_entities = self._expand_graph_context(entity_hints, max_hops=1, limit=15)
+
+        # ── 3. Tri-Fusion via RRF & Hybrid Graph Traversal ────────────
+        vector_context_fused = []
+        
+        if query_type in (QueryType.LOCAL, QueryType.HYBRID):
+            # Fuse Vector + BM25 + Graph-text retrieval via RRF
+            fusion_lists = [l for l in [vector_candidates, bm25_candidates, graph_candidates] if l]
+            fused_chunks = self._reciprocal_rank_fusion(fusion_lists) if fusion_lists else []
+            
+            # Take top 5 for final prompt
+            top_fused = fused_chunks[:5]
+            vector_context_fused = [(c["text"], c["source"]) for c in top_fused]
+            
+            # Hybrid Graph Traversal from top seeds
+            traversal_results = self._hybrid_graph_traversal(top_fused, max_nodes=3)
+            
+            # Add semantic neighbors as context
+            for nc in traversal_results["chunks"]:
+                vector_context_fused.append((nc["text"], nc["source_title"]))
+                
+            # Add connected entities to our expanded list
+            expanded_entities.extend(traversal_results["entities"])
+
+        # ── 4. Summary retrieval ──────────────────────────────────────
         summary_context = []
         if self.summary_index and query_type in (QueryType.GLOBAL, QueryType.HYBRID):
             try:
                 summary_nodes = self.summary_index.as_retriever().retrieve(query)
-                summary_context = _get_context_with_sources(summary_nodes)
+                summary_formatted = _get_context_with_sources(summary_nodes)
+                summary_context = [(c["text"], c["source"]) for c in summary_formatted[:3]]
                 all_sources.extend(self._extract_sources(summary_nodes))
             except Exception as e:
                 print(f"  Summary retrieval error: {e}")
 
-        # ── 4. Community retrieval (GraphRAG global search) ───────────
+        # ── 5. Community retrieval (GraphRAG global search) ───────────
         community_context = []
         if self.community_summarizer and query_type in (QueryType.GLOBAL, QueryType.HYBRID):
             try:
@@ -539,11 +666,22 @@ class HybridEngine:
             except Exception as e:
                 print(f"  Community retrieval error: {e}")
 
-        # ── 5. Entity-Centric Summarization ───────────────────────────
+        # ── 6. Entity-Centric Summarization ───────────────────────────
         summarized_graph = []
-        if graph_context or expanded_entities:
+        raw_graph_tuples = [(c["text"], c["source"]) for c in graph_candidates]
+        
+        if raw_graph_tuples or expanded_entities:
+            # Deduplicate expanded entities
+            seen_ent = set()
+            uniq_ent = []
+            for e in expanded_entities:
+                key = e.get("name", "")
+                if key and key not in seen_ent:
+                    seen_ent.add(key)
+                    uniq_ent.append(e)
+                    
             summarized_graph = self._summarize_entity_context(
-                graph_context, expanded_entities
+                raw_graph_tuples[:5], uniq_ent
             )
 
         # Deduplicate sources
@@ -557,8 +695,8 @@ class HybridEngine:
 
         return {
             "graph_context": summarized_graph,
-            "raw_graph_context": graph_context,
-            "vector_context": vector_context,
+            "raw_graph_context": raw_graph_tuples,
+            "vector_context": vector_context_fused,
             "summary_context": summary_context,
             "community_context": community_context,
             "sources": unique_sources,

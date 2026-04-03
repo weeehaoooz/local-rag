@@ -16,6 +16,9 @@ lxml                # Parser backend for BeautifulSoup
 easyocr             # Local OCR for images and scanned PDFs
 Pillow              # Image handling for OCR
 
+# --- BM25 Sparse Retrieval ---
+llama-index-retrievers-bm25   # Lexical keyword search for hybrid retrieval
+
 # --- Graph Cleaning & Community Detection ---
 numpy               # Vectorized cosine similarity for graph cleaning
 networkx            # Louvain/Leiden community detection for GraphRAG

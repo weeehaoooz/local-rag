@@ -23,6 +23,10 @@ class SummaryIndexer(BaseIndexer):
                 self.index.insert(doc)
         return self.index
 
+    async def aindex_documents(self, documents: List[Document], **kwargs) -> Any:
+        """Async variant — delegates to the sync path."""
+        return self.index_documents(documents, title=kwargs.get("title"))
+
     @staticmethod
     def _enrich(documents: List[Document], title: Optional[str]) -> List[Document]:
         if not title:
