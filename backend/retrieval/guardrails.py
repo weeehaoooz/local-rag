@@ -6,8 +6,11 @@ from llama_index.core import Settings
 from llama_index.core.schema import Document
 
 
-GUARDRAILS_DIR = os.path.join(os.path.dirname(__file__), "generated_guardrails")
-SUMMARIES_DIR = os.path.join(os.path.dirname(__file__), "generated_summaries")
+from config import GUARDRAILS_DIR, SUMMARIES_DIR
+
+
+GUARDRAILS_DIR = GUARDRAILS_DIR
+SUMMARIES_DIR = SUMMARIES_DIR
 
 
 def _derive_category(file_path: str, data_root: str = "./data") -> str:

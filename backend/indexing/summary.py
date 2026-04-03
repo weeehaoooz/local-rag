@@ -2,7 +2,7 @@ import os
 from typing import List, Any, Optional
 from llama_index.core import SummaryIndex, StorageContext, load_index_from_storage
 from llama_index.core.schema import Document
-from indexers.base import BaseIndexer
+from indexing.base import BaseIndexer
 
 
 class SummaryIndexer(BaseIndexer):

@@ -18,7 +18,7 @@ from typing import List, Optional, Any
 from llama_index.core.schema import Document, TextNode
 from llama_index.retrievers.bm25 import BM25Retriever
 
-from indexers.base import BaseIndexer
+from indexing.base import BaseIndexer
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +66,7 @@ class BM25Indexer(BaseIndexer):
         if self._retriever is None and self._nodes:
             self._retriever = BM25Retriever.from_defaults(
                 nodes=self._nodes,
-                similarity_top_k=self._similarity_top_k,
+                similarity_top_k=min(self._similarity_top_k, len(self._nodes)),
             )
         return self._retriever
 
@@ -79,7 +79,7 @@ class BM25Indexer(BaseIndexer):
             # Rebuild to ensure the retriever is in sync with _nodes
             self._retriever = BM25Retriever.from_defaults(
                 nodes=self._nodes,
-                similarity_top_k=self._similarity_top_k,
+                similarity_top_k=min(self._similarity_top_k, len(self._nodes)),
             )
             self._retriever.persist(persist_dir)
             logger.info("BM25Indexer: persisted %d nodes to %s", len(self._nodes), persist_dir)

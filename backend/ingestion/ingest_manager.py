@@ -310,7 +310,7 @@ class AsyncIngestionManager:
             documents = await self._preprocessor.apreprocess(documents)
 
             # 3. Derive category & title
-            from indexers.guardrails import _derive_category, _derive_title
+            from retrieval.guardrails import _derive_category, _derive_title
             category = _derive_category(file_path, self.data_dir)
             title = _derive_title(file_path)
 
@@ -382,13 +382,13 @@ class AsyncIngestionManager:
 
     def _init_dependencies(self) -> None:
         """Lazily import and create the shared pipeline components."""
-        from indexers.tracker import IndexingTracker
-        from indexers.loader import SmartDocumentLoader
-        from indexers.preprocessor import DocumentPreprocessor
-        from indexers.vector import VectorIndexer
-        from indexers.summary import SummaryIndexer
-        from indexers.graph import GraphIndexer
-        from indexers.guardrails import GuardrailManager
+        from indexing.tracker import IndexingTracker
+        from ingestion.loader import SmartDocumentLoader
+        from ingestion.preprocessor import DocumentPreprocessor
+        from indexing.vector import VectorIndexer
+        from indexing.summary import SummaryIndexer
+        from indexing.graph import GraphIndexer
+        from retrieval.guardrails import GuardrailManager
 
         import os as _os
         from llama_index.core import StorageContext

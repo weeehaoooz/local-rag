@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Literal
 
-from indexers.ingest_manager import AsyncIngestionManager
+from ingestion.ingest_manager import AsyncIngestionManager
 
 # ── Global references ─────────────────────────────────────────────────
 _engine = None
@@ -23,7 +23,7 @@ def _get_engine():
     """Lazy-init the HybridEngine (heavy, only created once)."""
     global _engine
     if _engine is None:
-        from engine import HybridEngine
+        from retrieval.engine import HybridEngine
         _engine = HybridEngine()
     return _engine
 
@@ -36,10 +36,12 @@ async def lifespan(app: FastAPI):
     # Startup: pre-warm the engine
     _get_engine()
 
+    from config import DATA_DIR, STORAGE_DIR
+
     # Startup: launch the background ingestion manager
     _ingest_manager = AsyncIngestionManager(
-        data_dir=os.getenv("INGEST_DATA_DIR", "./data"),
-        storage_dir=os.getenv("INGEST_STORAGE_DIR", "./storage"),
+        data_dir=os.getenv("INGEST_DATA_DIR", DATA_DIR),
+        storage_dir=os.getenv("INGEST_STORAGE_DIR", STORAGE_DIR),
         max_workers=int(os.getenv("INGEST_MAX_WORKERS", "2")),
         scan_interval_seconds=float(os.getenv("INGEST_SCAN_INTERVAL", "0")),
     )

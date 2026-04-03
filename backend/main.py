@@ -1,5 +1,5 @@
 import ollama
-from engine import HybridEngine
+from retrieval.engine import HybridEngine
 
 engine = HybridEngine()
 
