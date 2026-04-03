@@ -17,13 +17,8 @@ debug.log
 *.log
 
 # RAG Storage & Generated Data
-/backend/storage/
-/backend/indexers/generated_guardrails/
-/backend/indexers/generated_summaries/
-/backend/index_storage/
-/backend/test_data/
+/storage/
 
 # System
 .DS_Store
 Thumbs.db
-old_data/
