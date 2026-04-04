@@ -16,7 +16,7 @@ from llama_index.core.indices.property_graph import (
     ImplicitPathExtractor,
 )
 
-from llama_index.core.node_parser import SentenceSplitter
+from llama_index.core.node_parser import SentenceSplitter, SemanticSplitterNodeParser
 from llama_index.graph_stores.neo4j import Neo4jPropertyGraphStore
 from indexing.base import BaseIndexer
 
@@ -398,11 +398,16 @@ def _small_to_big_parse(
     """
     from llama_index.core import Settings as _Settings
     _llm = llm or _Settings.llm
+    _embed_model = _Settings.embed_model
 
-    big_splitter = SentenceSplitter(
-        chunk_size=big_chunk_size,
-        chunk_overlap=big_chunk_overlap,
+    # Use SemanticSplitter for "Big" (Parent) chunks to ensure topic coherence
+    big_splitter = SemanticSplitterNodeParser(
+        buffer_size=1,
+        breakpoint_percentile_threshold=95,
+        embed_model=_embed_model,
     )
+    
+    # Use SentenceSplitter for "Small" (Child) chunks for precise triplet extraction
     small_splitter = SentenceSplitter(
         chunk_size=small_chunk_size,
         chunk_overlap=small_chunk_overlap,

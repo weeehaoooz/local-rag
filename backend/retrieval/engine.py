@@ -2,6 +2,11 @@ import os
 import json
 import logging
 from dotenv import load_dotenv
+import nest_asyncio
+
+# Apply nest_asyncio to handle nested event loops in llama-index
+nest_asyncio.apply()
+
 from llama_index.core import (
     PropertyGraphIndex, StorageContext, Settings, load_index_from_storage,
 )

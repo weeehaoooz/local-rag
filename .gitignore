@@ -22,6 +22,8 @@ htmlcov/
 .ruff_cache/
 backend/venv/
 backend/.env
+backend/CLAUDE.md
+backend/.claude/
 
 # RAG Storage & Generated Data
 /backend/data/

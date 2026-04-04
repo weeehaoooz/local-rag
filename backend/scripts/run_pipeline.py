@@ -117,7 +117,7 @@ def index_files(files_to_index, is_regen, indexers, managers, options):
         progress_handler.end()
 
 
-async def run_pipeline(step="all", force=False, hybrid=False, agentic_chunk=False, passes=1):
+async def run_pipeline(step="all", force=False, hybrid=False, agentic_chunk=False, passes=1, **kwargs):
     print(f"\n🚀 Running Pipeline Step: {step.upper()} (Force: {force})")
     from config import (
         DATA_DIR, STORAGE_DIR, INDEXING_STATE, 
@@ -130,8 +130,8 @@ async def run_pipeline(step="all", force=False, hybrid=False, agentic_chunk=Fals
 
     tracker = IndexingTracker(INDEXING_STATE)
     guardrail_mgr = GuardrailManager()
-    loader = SmartDocumentLoader()
-    preprocessor = DocumentPreprocessor()
+    loader = SmartDocumentLoader(enable_vision=kwargs.get("vision", False))
+    preprocessor = DocumentPreprocessor(enable_llm_coref=kwargs.get("llm_coref", False))
     progress_handler = create_progress_handler()
 
     # 2. Discovery (Always needed for context)
@@ -209,6 +209,25 @@ async def run_pipeline(step="all", force=False, hybrid=False, agentic_chunk=Fals
             graph_indexer.clear_cache()
             print("✅ Indexing complete.")
 
+    # --- STEP: GraphRAG Community Detection ---
+    if step in ["index", "all", "graph-rag"] and kwargs.get("graph_rag"):
+        print("\n--- [OPTIONAL STEP] GRAPHRAG COMMUNITY DETECTION ---")
+        # Ensure indexers are initialized if we only run this step
+        if 'graph_indexer' not in locals():
+            graph_indexer = GraphIndexer(storage_context)
+        if 'vector_indexer' not in locals():
+            vector_indexer = VectorIndexer()
+            vector_indexer.load(VECTOR_DIR)
+            
+        community_docs = graph_indexer.detect_and_summarize_communities()
+        if community_docs:
+            print(f"  -> Indexing {len(community_docs)} community summaries into Vector store...")
+            vector_indexer.index_documents(community_docs)
+            vector_indexer.persist(VECTOR_DIR)
+            print("✅ GraphRAG community detection and indexing complete.")
+        else:
+            print("  -> No communities detected or summarized.")
+
     graph_store.close()
     print("\n✨ Pipeline run finished successfully.")
 
@@ -219,6 +238,9 @@ def main():
     parser.add_argument("--hybrid", action="store_true", help="Use hybrid KG extraction (Schema + Free-form)")
     parser.add_argument("--agentic-chunk", action="store_true", help="Enable agentic chunking (LLM-guided)")
     parser.add_argument("--passes", type=int, default=1, help="Number of graph extraction passes")
+    parser.add_argument("--graph-rag", action="store_true", help="Enable GraphRAG community detection and summarization")
+    parser.add_argument("--llm-coref", action="store_true", help="Enable high-quality LLM-based coreference resolution")
+    parser.add_argument("--vision", action="store_true", help="Enable vision-based PDF metadata extraction")
     
     args = parser.parse_args()
     
@@ -228,7 +250,10 @@ def main():
         force=args.force, 
         hybrid=args.hybrid, 
         agentic_chunk=args.agentic_chunk, 
-        passes=args.passes
+        passes=args.passes,
+        graph_rag=args.graph_rag,
+        llm_coref=args.llm_coref,
+        vision=args.vision
     ))
 
 if __name__ == "__main__":

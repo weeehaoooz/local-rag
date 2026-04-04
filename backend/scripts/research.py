@@ -36,6 +36,8 @@ class ResearchCLI:
         self.mode = "arxiv"  # arxiv, web, news, deep
         self.current_topic = None
         self.results: List[Dict] = []
+        self.plan: Dict = {}
+        self.synthesis: str = ""
 
     # ------------------------------------------------------------------
     # UI helpers
@@ -43,9 +45,9 @@ class ResearchCLI:
 
     def display_welcome(self):
         self.console.print(Panel.fit(
-            "[bold cyan]Research Engine CLI[/bold cyan]\n"
+            "[bold cyan]Advanced Research Engine[/bold cyan]\n"
             f"[italic]Powered by Ollama | Current Mode: [bold yellow]{self.mode.upper()}[/bold yellow][/italic]\n\n"
-            "Type a topic to research, or use [bold green]/help[/bold green] for commands.",
+            "Type a topic to research, or use [bold green]/help[/bold green] for interactive commands.",
             title="Welcome", border_style="blue"
         ))
 
@@ -54,11 +56,14 @@ class ResearchCLI:
         table.add_column("Command", style="bold green")
         table.add_column("Description")
         table.add_row("/topic <topic>", "Start research on a specific topic.")
-        table.add_row("/mode <mode>", "Switch between [yellow]arxiv[/], [yellow]web[/], [yellow]news[/], and [yellow]deep[/].")
+        table.add_row("/mode <mode>", "Switch between [yellow]arxiv, web, news, deep[/].")
+        table.add_row("/ask <query>", "Ask a question about the current research findings.")
+        table.add_row("/analyze <idx>", "Get a deep-dive analysis of a specific result.")
+        table.add_row("/refine <feedback>", "Refine the current research plan.")
+        table.add_row("/synthesize", "Regenerate the research synthesis report.")
         table.add_row("/limit <n>", "Set max results per query (default: 5).")
         table.add_row("/clear", "Clear results and history.")
         table.add_row("/exit", "Exit the Research Engine.")
-        table.add_row("<any text>", "Treated as a research topic in current mode.")
         self.console.print(table)
 
     # ------------------------------------------------------------------
@@ -67,10 +72,6 @@ class ResearchCLI:
 
     @staticmethod
     def _deduplicate(results: List[Dict]) -> List[Dict]:
-        """
-        Remove duplicate results across all sources.
-        ArXiv results are keyed by 'id'; web/news/dictionary by 'link'.
-        """
         seen: set = set()
         unique: List[Dict] = []
         for r in results:
@@ -82,138 +83,129 @@ class ResearchCLI:
 
     def run_research(self, topic: str):
         self.current_topic = topic
+        self.results = []
+        self.synthesis = ""
 
         # 1. Planning phase
-        with self.console.status(
-            f"[bold yellow]Analyzing topic: {topic} ({self.mode}) via Ollama...[/]", spinner="dots"
-        ):
-            plan = self.planner.generate_plan(topic, mode=self.mode)
+        with self.console.status(f"[bold yellow]Planning research for: {topic}...[/]", spinner="dots"):
+            self.plan = self.planner.generate_plan(topic, mode=self.mode)
 
-        self.console.print(f"\n[bold green]Research Objective:[/] {plan['objective']}")
+        self.interactive_planning()
 
-        # Pretty-print the planned queries, handling both str and dict formats
-        query_labels = []
-        for q in plan["queries"]:
-            if isinstance(q, dict):
-                query_labels.append(f"{q['query']} [dim]({q.get('backend', '?')})[/]")
+    def interactive_planning(self):
+        while True:
+            self.console.print(Panel(
+                f"[bold green]Objective:[/] {self.plan['objective']}\n"
+                f"[bold cyan]Queries:[/] {', '.join(self._get_query_labels(self.plan['queries']))}",
+                title="Proposed Research Plan", border_style="green"
+            ))
+
+            choice = Prompt.ask(
+                "\n[bold]Execute plan, [yellow]refine[/] it, or [red]cancel[/]?[/]",
+                choices=["e", "r", "c"], default="e"
+            )
+
+            if choice == "e":
+                self.execute_search()
+                break
+            elif choice == "r":
+                feedback = Prompt.ask("[yellow]What should I change in the plan?[/]")
+                with self.console.status("[bold yellow]Refining plan...[/]", spinner="dots"):
+                    self.plan = self.planner.refine_plan(self.current_topic, self.plan, feedback)
             else:
-                query_labels.append(str(q))
-        self.console.print(f"[bold cyan]Planned Queries:[/] {', '.join(query_labels)}\n")
+                self.console.print("[red]Research cancelled.[/]")
+                break
 
+    def _get_query_labels(self, queries: List) -> List[str]:
+        labels = []
+        for q in queries:
+            if isinstance(q, dict):
+                labels.append(f"{q['query']} [dim]({q.get('backend', '?')})[/]")
+            else:
+                labels.append(str(q))
+        return labels
+
+    def execute_search(self):
         # 2. Searching phase
         with self.console.status(f"[bold yellow]Searching {self.mode.upper()}...[/]", spinner="earth"):
             if self.mode == "arxiv":
-                self.results = self.arxiv_searcher.search(plan["queries"])
-
+                self.results = self.arxiv_searcher.search(self.plan["queries"])
             elif self.mode == "web":
-                self.results = self.web_searcher.search_text(plan["queries"])
-
+                self.results = self.web_searcher.search_text(self.plan["queries"])
             elif self.mode == "news":
-                self.results = self.web_searcher.search_news(plan["queries"])
-
+                self.results = self.web_searcher.search_news(self.plan["queries"])
             elif self.mode == "deep":
-                # Route each query to its LLM-labelled backend
-                arxiv_queries: List[str] = []
-                web_queries: List[str] = []
-
-                for q in plan["queries"]:
-                    if isinstance(q, dict):
-                        backend = q.get("backend", "web").lower()
-                        query_str = q.get("query", "")
-                    else:
-                        # Fallback for plain-string queries (shouldn't happen in deep mode)
-                        backend = "web"
-                        query_str = str(q)
-
-                    if backend == "arxiv":
-                        arxiv_queries.append(query_str)
-                    else:
-                        web_queries.append(query_str)
-
-                self.console.print(
-                    f"[dim]  → ArXiv: {len(arxiv_queries)} queries | Web: {len(web_queries)} queries[/]"
-                )
-
-                arxiv_results = self.arxiv_searcher.search(arxiv_queries) if arxiv_queries else []
-                web_results = self.web_searcher.search_text(web_queries) if web_queries else []
-                self.results = self._deduplicate(arxiv_results + web_results)
+                arxiv_queries = [q["query"] for q in self.plan["queries"] if isinstance(q, dict) and q.get("backend") == "arxiv"]
+                web_queries = [q["query"] for q in self.plan["queries"] if isinstance(q, dict) and q.get("backend") == "web"]
+                
+                arxiv_res = self.arxiv_searcher.search(arxiv_queries) if arxiv_queries else []
+                web_res = self.web_searcher.search_text(web_queries) if web_queries else []
+                self.results = self._deduplicate(arxiv_res + web_res)
 
         if not self.results:
-            self.console.print(f"[bold red]No results found in {self.mode} mode.[/]")
+            self.console.print("[bold red]No results found.[/]")
             return
 
-        # 2.5 Terminology Discovery — only for web/news/deep (not pure arxiv)
+        # 2.5 Terminology Discovery
         if self.mode in ["deep", "web", "news"]:
-            with self.console.status("[bold magenta]Discovering key terminologies...[/]", spinner="simpleDots"):
+            with self.console.status("[bold magenta]Discovering technical terms...[/]", spinner="simpleDots"):
                 terms = self.planner.discover_terms(self.results)
                 if terms:
-                    self.console.print(f"[bold magenta]Found technical terms:[/] {', '.join(terms)}")
+                    self.console.print(f"[bold magenta]Key Terms:[/] {', '.join(terms)}")
                     definitions = self.web_searcher.search_definitions(terms)
-                    # Prepend definitions; deduplicate in case any def URL already appeared
                     self.results = self._deduplicate(definitions + self.results)
 
-        # 3. Display Results
-        table = Table(title=f"{self.mode.upper()} Results for: {topic}", show_lines=True)
+        # 3. Synthesis Phase
+        with self.console.status("[bold blue]Synthesizing Research Report...[/]", spinner="aesthetic"):
+            self.synthesis = self.planner.synthesize_results(self.current_topic, self.results)
+
+        self.display_results()
+
+    def display_results(self):
+        # Display Synthesis
+        self.console.print(Panel(
+            self.synthesis, title=f"Research Report: {self.current_topic}", border_style="blue"
+        ))
+
+        # Display Results Table
+        table = Table(title="Retrieved Sources", show_lines=True)
         table.add_column("Idx", justify="center", style="dim")
         table.add_column("Source", style="bold cyan")
-        table.add_column("Title / Authors", style="bold white")
-        table.add_column("Summary / Snippet", style="dim")
+        table.add_column("Title / Snippet", style="white")
 
         for i, r in enumerate(self.results, 1):
             source = r.get("source", "web").capitalize()
-
-            if r.get("source") == "arxiv":
-                title_line = f"{r['title']}\n[italic]{', '.join(r.get('authors', [])[:2])}[/]"
-                content = r.get("summary", "")[:200] + "..."
-            else:
-                title_line = r.get("title", "(no title)")
-                content = r.get("snippet", "")[:200] + "..."
-
-            table.add_row(str(i), source, title_line, content)
+            title = r.get("title", "(no title)")
+            content = r.get("snippet", r.get("summary", ""))[:150] + "..."
+            table.add_row(str(i), source, f"[bold]{title}[/]\n[dim]{content}[/]")
 
         self.console.print(table)
-
-        # 4. Save / Download phase
-        has_arxiv = any(r.get("source") == "arxiv" for r in self.results)
-        has_web = any(r.get("source") in ["web", "news", "dictionary"] for r in self.results)
-
-        actions = []
-        if has_arxiv:
-            actions.append("Download PDFs")
-        if has_web:
-            actions.append("Scrape full articles/definitions to TXT")
-
-        action_str = " & ".join(actions) if actions else "Save"
-        confirm = Prompt.ask(
-            f"\n[bold]{action_str} for these results?[/]", choices=["y", "n"], default="y"
+        self.console.print(
+            "\n[dim]Use [bold]/ask[/] to query these results, [bold]/analyze <idx>[/] for deep-dives, or [bold]/exit[/] to finish.[/]"
         )
 
-        if confirm.lower() == "y":
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-                console=self.console,
-            ) as progress:
-                label = "Downloading" if self.mode == "arxiv" else "Scraping"
-                overall_task = progress.add_task(f"[cyan]{label} data...", total=len(self.results))
+    def chat_with_results(self, question: str):
+        if not self.results:
+            self.console.print("[red]No research context available. Start a topic first.[/]")
+            return
+        
+        with self.console.status("[bold cyan]Consulting findings...[/]", spinner="bouncingBall"):
+            answer = self.planner.chat_with_results(self.current_topic, question, self.results)
+        
+        self.console.print(Panel(answer, title="Research Assistant", border_style="cyan"))
 
-                for r in self.results:
-                    if r.get("source") == "arxiv":
-                        path = self.pdf_downloader.download(r)
-                    else:
-                        path = self.web_scraper.scrape_to_file(r)
-
-                    if path:
-                        progress.print(f"✅ [green]Saved:[/] {os.path.basename(path)}")
-                    else:
-                        progress.print(f"❌ [red]Failed:[/] {r.get('title', '?')[:50]}...")
-                    progress.advance(overall_task)
-
-            self.console.print(
-                "\n[bold green]Success![/] Data available in research and web_research directories."
-            )
+    def analyze_item(self, idx_str: str):
+        try:
+            idx = int(idx_str) - 1
+            if 0 <= idx < len(self.results):
+                result = self.results[idx]
+                with self.console.status(f"[bold magenta]Analyzing result {idx+1}...[/]", spinner="pong"):
+                    analysis = self.planner.analyze_result(self.current_topic, result)
+                self.console.print(Panel(analysis, title=f"Deep Analysis: {result['title']}", border_style="magenta"))
+            else:
+                self.console.print(f"[red]Invalid index: {idx_str}[/]")
+        except ValueError:
+            self.console.print("[red]Please provide a numeric index.[/]")
 
     # ------------------------------------------------------------------
     # Interactive CLI loop
@@ -247,29 +239,44 @@ class ResearchCLI:
                                 self.mode = new_mode
                                 self.console.print(f"[green]Switched to [bold]{new_mode.upper()}[/] mode.[/]")
                             else:
-                                self.console.print("[red]Invalid mode. Choose: arxiv, web, news, or deep.[/]")
-                        else:
-                            self.console.print(f"[cyan]Current mode: {self.mode}. Usage: /mode <arxiv|web|news|deep>[/]")
+                                self.console.print("[red]Invalid mode.[/]")
                     elif cmd == "/topic":
                         if len(parts) > 1:
                             self.run_research(parts[1])
                         else:
-                            self.console.print("[red]Please specify a topic. Usage: /topic <topic>[/]")
-                    elif cmd == "/limit":
-                        if len(parts) > 1 and parts[1].isdigit():
-                            limit = int(parts[1])
-                            self.arxiv_searcher.max_results = limit
-                            self.web_searcher.max_results = limit
-                            self.console.print(f"[green]Limit set to {limit}[/]")
+                            self.console.print("[red]Usage: /topic <topic>[/]")
+                    elif cmd == "/ask":
+                        if len(parts) > 1:
+                            self.chat_with_results(parts[1])
                         else:
-                            self.console.print("[red]Invalid limit. Usage: /limit <number>[/]")
+                            self.console.print("[red]Usage: /ask <question>[/]")
+                    elif cmd == "/analyze":
+                        if len(parts) > 1:
+                            self.analyze_item(parts[1])
+                        else:
+                            self.console.print("[red]Usage: /analyze <index>[/]")
+                    elif cmd == "/refine":
+                        if self.current_topic and self.plan:
+                            feedback = parts[1] if len(parts) > 1 else Prompt.ask("[yellow]Refinement feedback?[/]")
+                            with self.console.status("[bold yellow]Refining...[/]"):
+                                self.plan = self.planner.refine_plan(self.current_topic, self.plan, feedback)
+                            self.interactive_planning()
+                        else:
+                            self.console.print("[red]No active research to refine.[/]")
+                    elif cmd == "/synthesize":
+                        if self.results:
+                            with self.console.status("[bold blue]Regenerating report...[/]"):
+                                self.synthesis = self.planner.synthesize_results(self.current_topic, self.results)
+                            self.display_results()
+                        else:
+                            self.console.print("[red]No results to synthesize.[/]")
                     elif cmd == "/clear":
                         self.results = []
                         self.current_topic = None
                         self.console.clear()
                         self.display_welcome()
                     else:
-                        self.console.print(f"[red]Unknown command: {cmd}. Type /help for assistance.[/]")
+                        self.console.print(f"[red]Unknown command: {cmd}[/]")
                 else:
                     self.run_research(user_input)
 

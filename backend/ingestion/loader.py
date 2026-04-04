@@ -22,7 +22,8 @@ import re
 import asyncio
 from typing import List, Optional, Any
 
-from llama_index.core import SimpleDirectoryReader
+import ollama
+from llama_index.core import SimpleDirectoryReader, Settings
 from llama_index.core.schema import Document
 import numpy as np
 
@@ -142,23 +143,48 @@ def _detect_sections(text: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Vision Helper
+# ---------------------------------------------------------------------------
+
+def _describe_image_with_vision(image_bytes: bytes, model_name: str = "gemma4:latest") -> str:
+    """
+    Use a multimodal LLM (via Ollama) to describe an image.
+    Specifically prompted to extract data from charts and diagrams.
+    """
+    prompt = (
+        "You are a technical document analyst. Describe this image in detail. "
+        "If it is a chart or technical diagram, explain the axes, data trends, "
+        "legend, and the main message it conveys. If it is an illustration, "
+        "describe the subjects and their actions. Be concise and factual."
+    )
+    try:
+        response = ollama.generate(
+            model=model_name,
+            prompt=prompt,
+            images=[image_bytes]
+        )
+        return response.get('response', '').strip()
+    except Exception as e:
+        logger.warning("[loader] Vision description failed: %s", e)
+        return ""
+
+
+# ---------------------------------------------------------------------------
 # PDF loader
 # ---------------------------------------------------------------------------
 
-def _load_pdf_with_pdfplumber(file_path: str, metadata: dict) -> List[Document]:
+def _load_pdf_with_pdfplumber(file_path: str, metadata: dict, enable_vision: bool = False) -> List[Document]:
     """
     Extract text from a PDF using pdfplumber.
 
-    Features vs SimpleDirectoryReader:
-    - Reading order detection: sorts text blocks left-to-right, top-to-bottom
-      within each page.  This prevents multi-column text from being interleaved.
-    - Table-to-Markdown: detected tables are embedded as Markdown blocks so the
-      LLM can understand row/column relationships during triplet extraction.
-    - OCR Fallback: if a page appears to be a scan (little or no text), converts
-      the page to an image and runs easyocr.
-    - Per-page Documents: emits one Document per page with rich metadata.
+    Features:
+    - Layout-aware extraction.
+    - Table-to-Markdown conversion.
+    - OCR fallback for scanned pages.
+    - Vision-based image description (Optional).
     """
     documents: list[Document] = []
+    vision_model = getattr(Settings.llm, "model", "gemma4:latest") if hasattr(Settings, "llm") else "gemma4:latest"
 
     with pdfplumber.open(file_path) as pdf:
         total_pages = len(pdf.pages)
@@ -167,54 +193,60 @@ def _load_pdf_with_pdfplumber(file_path: str, metadata: dict) -> List[Document]:
             page_parts: list[str] = []
             used_ocr = False
 
-            # 1. Extract tables first and note their bounding boxes
+            # 1. Extract tables
             table_bboxes: list[tuple] = []
             for table in page.extract_tables():
                 md = _table_to_markdown(table)
                 if md:
                     page_parts.append(f"\n[TABLE]\n{md}\n[/TABLE]\n")
 
-            # Collect bboxes of detected tables so we can exclude those regions
-            # from the normal text extraction (avoids double-extracting table cells)
             raw_tables = page.find_tables()
             table_bboxes = [tbl.bbox for tbl in raw_tables]
 
-            # 2. Extract text outside table bounding boxes
-            words = page.extract_words(
-                x_tolerance=3,
-                y_tolerance=3,
-                keep_blank_chars=False,
-            )
+            # 2. Extract significant images and describe them if vision is enabled
+            if enable_vision:
+                for idx, img_info in enumerate(page.images):
+                    # Filter: ignore tiny images (icons, logos, bullets)
+                    width = img_info["width"]
+                    height = img_info["height"]
+                    if width > 150 and height > 150:
+                        logger.info("[loader] Describing image %d on page %d of '%s'...", idx, page_num, os.path.basename(file_path))
+                        try:
+                            # Crop and convert to PNG bytes
+                            bbox = (img_info["x0"], img_info["top"], img_info["x1"], img_info["bottom"])
+                            # Ensure bbox is valid
+                            if bbox[2] > bbox[0] and bbox[3] > bbox[1]:
+                                cropped = page.within_bbox(bbox).to_image(resolution=200).original
+                                img_byte_arr = io.BytesIO()
+                                cropped.save(img_byte_arr, format='PNG')
+                                description = _describe_image_with_vision(img_byte_arr.getvalue(), model_name=vision_model)
+                                if description:
+                                    page_parts.append(f"\n[Visual Metadata - Image {idx}]\n{description}\n")
+                        except Exception as e:
+                            logger.warning("[loader] Failed to process image %d: %s", idx, e)
 
-            # Filter out words that fall inside a table bbox
+            # 3. Extract text
+            words = page.extract_words(x_tolerance=3, y_tolerance=3, keep_blank_chars=False)
+
             def _in_table(word: dict) -> bool:
-                wx0, wy0, wx1, wy1 = (
-                    word["x0"], word["top"], word["x1"], word["bottom"]
-                )
+                wx0, wy0, wx1, wy1 = word["x0"], word["top"], word["x1"], word["bottom"]
                 for bx0, by0, bx1, by1 in table_bboxes:
                     if wx0 >= bx0 and wx1 <= bx1 and wy0 >= by0 and wy1 <= by1:
                         return True
                 return False
 
             non_table_words = [w for w in words if not _in_table(w)]
-
-            # Re-assemble text in reading order
             page_body = _words_to_reading_order_text(non_table_words, page.width)
 
-            # 3. OCR Fallback for scanned pages
-            # If we got very little text (< 50 chars) and no tables, check if it's an image
+            # 4. OCR Fallback
             if len(page_body.strip()) < 50 and not page_parts and _HAS_EASYOCR:
-                logger.info("[loader] Low text on page %d of '%s'; attempting OCR...", page_num, os.path.basename(file_path))
+                logger.info("[loader] Low text on page %d; attempting OCR...", page_num)
                 try:
-                    # Render page to image for OCR
                     img = page.to_image(resolution=300).original
-                    # Convert PIL Image to bytes for easyocr
                     img_byte_arr = io.BytesIO()
                     img.save(img_byte_arr, format='PNG')
-                    img_bytes = img_byte_arr.getvalue()
-
                     reader = _get_ocr_reader()
-                    ocr_results = reader.readtext(img_bytes, detail=0, paragraph=True)
+                    ocr_results = reader.readtext(img_byte_arr.getvalue(), detail=0, paragraph=True)
                     ocr_text = "\n".join(ocr_results)
                     if ocr_text.strip():
                         page_parts.append(f"[OCR Content]\n{ocr_text}")
@@ -226,8 +258,6 @@ def _load_pdf_with_pdfplumber(file_path: str, metadata: dict) -> List[Document]:
                 page_parts.insert(0, page_body)
 
             page_text = f"[Page {page_num}]\n" + "\n".join(page_parts)
-
-            # Detect section headers within the page text
             sections = _detect_sections(page_text)
 
             page_metadata = {
@@ -238,6 +268,7 @@ def _load_pdf_with_pdfplumber(file_path: str, metadata: dict) -> List[Document]:
                 "total_pages": total_pages,
                 "has_tables": len(raw_tables) > 0,
                 "used_ocr": used_ocr,
+                "has_visual_metadata": enable_vision and any("[Visual Metadata]" in p for p in page_parts)
             }
             if sections:
                 page_metadata["sections"] = sections
@@ -291,20 +322,38 @@ def _words_to_reading_order_text(words: list[dict], page_width: float) -> str:
 
 def _load_docx_with_python_docx(file_path: str, metadata: dict) -> List[Document]:
     """
-    Extract text from a DOCX file preserving heading hierarchy and tables.
-    Headings are emitted as Markdown `#` / `##` / `###` prefix so the recursive
-    splitter can use section boundaries.
+    Extract text from a DOCX file, splitting into separate Document objects
+    based on heading boundaries (H1, H2, H3).
     """
     doc_obj = docx.Document(file_path)
-    parts: list[str] = []
-    detected_sections: list[str] = []
-    has_tables = False
+    documents: list[Document] = []
+    
+    current_section_title = "Preamble"
+    current_parts: list[str] = []
+    has_tables_in_current = False
+    all_sections: list[str] = []
+
+    def _flush_section():
+        nonlocal current_parts, has_tables_in_current
+        if not current_parts:
+            return
+        
+        section_text = "\n\n".join(current_parts)
+        doc_metadata = {
+            **metadata,
+            "file_path": file_path,
+            "source_type": "docx",
+            "section_title": current_section_title,
+            "has_tables": has_tables_in_current,
+        }
+        documents.append(Document(text=section_text, metadata=doc_metadata))
+        current_parts = []
+        has_tables_in_current = False
 
     for block in doc_obj.element.body:
         tag = block.tag.split("}")[-1] if "}" in block.tag else block.tag
 
         if tag == "p":
-            # Paragraph — check if it's a heading
             para = _find_paragraph(doc_obj, block)
             if para is None:
                 continue
@@ -313,40 +362,37 @@ def _load_docx_with_python_docx(file_path: str, metadata: dict) -> List[Document
             if not text:
                 continue
 
-            if "Heading 1" in style_name:
-                parts.append(f"# {text}")
-                detected_sections.append(text)
-            elif "Heading 2" in style_name:
-                parts.append(f"## {text}")
-                detected_sections.append(text)
-            elif "Heading 3" in style_name:
-                parts.append(f"### {text}")
-                detected_sections.append(text)
+            # Check for heading levels to trigger a section break
+            is_heading = any(h in style_name for h in ["Heading 1", "Heading 2", "Heading 3"])
+            
+            if is_heading:
+                _flush_section()
+                current_section_title = text
+                all_sections.append(text)
+                # We also include the heading in the text for context
+                level = 1 if "Heading 1" in style_name else (2 if "Heading 2" in style_name else 3)
+                current_parts.append("#" * level + " " + text)
             else:
-                parts.append(text)
+                current_parts.append(text)
 
         elif tag == "tbl":
-            # Table — convert to Markdown
             tbl = _find_table(doc_obj, block)
             if tbl is None:
                 continue
             rows = [[cell.text.strip() for cell in row.cells] for row in tbl.rows]
             md = _table_to_markdown(rows)
             if md:
-                parts.append(f"\n[TABLE]\n{md}\n[/TABLE]\n")
-                has_tables = True
+                current_parts.append(f"\n[TABLE]\n{md}\n[/TABLE]\n")
+                has_tables_in_current = True
 
-    full_text = "\n\n".join(parts)
-    doc_metadata = {
-        **metadata,
-        "file_path": file_path,
-        "source_type": "docx",
-        "has_tables": has_tables,
-    }
-    if detected_sections:
-        doc_metadata["sections"] = detected_sections
+    _flush_section()
 
-    return [Document(text=full_text, metadata=doc_metadata)]
+    # Back-fill the 'sections' list to all documents for global context
+    if all_sections:
+        for doc in documents:
+            doc.metadata["sections"] = all_sections
+
+    return documents
 
 
 def _find_paragraph(doc_obj, elem):
@@ -371,8 +417,8 @@ def _find_table(doc_obj, elem):
 
 def _load_html(file_path: str, metadata: dict) -> List[Document]:
     """
-    Extract readable text from an HTML file, stripping scripts, styles, and
-    navigation boilerplate (nav, header, footer elements).
+    Extract readable text from an HTML file, splitting into separate Document
+    objects based on heading boundaries (H1, H2, H3).
     """
     with open(file_path, "r", encoding="utf-8", errors="replace") as fh:
         raw_html = fh.read()
@@ -385,27 +431,73 @@ def _load_html(file_path: str, metadata: dict) -> List[Document]:
 
     # Extract main content preferentially
     main = soup.find("main") or soup.find("article") or soup.find("body") or soup
-    text = main.get_text(separator="\n")
+    
+    # We want to keep heading information to split the text.
+    # We'll replace headings with markers and then split.
+    import uuid
+    split_marker_template = "---SPLIT-{}-{}---"
+    
+    sections_list = []
+    for h in main.find_all(["h1", "h2", "h3"]):
+        title = h.get_text(strip=True)
+        if not title:
+            continue
+        level = h.name[1] # '1', '2', or '3'
+        marker = split_marker_template.format(level, title)
+        h.replace_with(marker)
+        sections_list.append(title)
 
-    # Extract heading structure for section metadata
-    heading_tags = main.find_all(["h1", "h2", "h3"]) if main else []
-    sections = [h.get_text(strip=True) for h in heading_tags if h.get_text(strip=True)]
+    text = main.get_text(separator="\n")
+    
+    # Split by markers
+    pattern = re.escape("---SPLIT-").replace("\\-", "-") + r"(\d)\-(.*?)\-\-\-"
+    parts = re.split(pattern, text)
+    
+    documents: list[Document] = []
+    
+    # First part is Preamble (before any heading)
+    if parts[0].strip():
+        documents.append(Document(
+            text=parts[0].strip(),
+            metadata={
+                **metadata,
+                "file_path": file_path,
+                "source_type": "html",
+                "section_title": "Preamble"
+            }
+        ))
+    
+    # Subsequent parts come in triples: (level, title, content)
+    for i in range(1, len(parts), 3):
+        level = parts[i]
+        title = parts[i+1]
+        content = parts[i+2].strip()
+        
+        if content:
+            # Re-insert the heading for context
+            full_content = "#" * int(level) + " " + title + "\n\n" + content
+            documents.append(Document(
+                text=full_content,
+                metadata={
+                    **metadata,
+                    "file_path": file_path,
+                    "source_type": "html",
+                    "section_title": title
+                }
+            ))
 
     # Extract page title
     title_tag = soup.find("title")
     page_title = title_tag.get_text(strip=True) if title_tag else None
 
-    doc_metadata = {
-        **metadata,
-        "file_path": file_path,
-        "source_type": "html",
-    }
-    if sections:
-        doc_metadata["sections"] = sections
-    if page_title:
-        doc_metadata["html_title"] = page_title
+    # Enrich metadata for all docs
+    for doc in documents:
+        if sections_list:
+            doc.metadata["sections"] = sections_list
+        if page_title:
+            doc.metadata["html_title"] = page_title
 
-    return [Document(text=text, metadata=doc_metadata)]
+    return documents
 
 
 # ---------------------------------------------------------------------------
@@ -476,6 +568,9 @@ class SmartDocumentLoader:
         documents = loader.load(file_path)
     """
 
+    def __init__(self, enable_vision: bool = False):
+        self.enable_vision = enable_vision
+
     async def aload(self, file_path: str) -> List[Document]:
         """Asynchronously load a single file into a list of LlamaIndex Documents."""
         logger.debug("[loader] aload called for '%s'", file_path)
@@ -494,7 +589,7 @@ class SmartDocumentLoader:
         try:
             if fmt == "pdf" and _HAS_PDFPLUMBER:
                 logger.debug("[loader] Loading PDF with pdfplumber: %s", file_path)
-                return _load_pdf_with_pdfplumber(file_path, base_metadata)
+                return _load_pdf_with_pdfplumber(file_path, base_metadata, enable_vision=self.enable_vision)
 
             if fmt == "docx" and _HAS_DOCX:
                 logger.debug("[loader] Loading DOCX with python-docx: %s", file_path)

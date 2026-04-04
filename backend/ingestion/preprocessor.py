@@ -107,9 +107,14 @@ class DocumentPreprocessor:
     def __init__(
         self,
         enable_coref: bool = True,
+        enable_llm_coref: bool = False,
         spacy_model: str = "en_core_web_sm",
+        llm: Optional[Any] = None,
     ) -> None:
+        from llama_index.core import Settings
         self.enable_coref = enable_coref and _HAS_SPACY
+        self.enable_llm_coref = enable_llm_coref
+        self.llm = llm or Settings.llm
         self._nlp = None  # lazy-loaded
 
         if self.enable_coref:
@@ -193,6 +198,8 @@ class DocumentPreprocessor:
         text = self._remove_boilerplate(text)
         if self.enable_coref and self._nlp is not None:
             text = self._resolve_coreferences(text)
+        if self.enable_llm_coref and self.llm is not None:
+            text = self._resolve_coreferences_llm(text)
         text = self._normalize_whitespace(text)
         doc.set_content(text)
         return doc
@@ -401,6 +408,53 @@ class DocumentPreprocessor:
             return antecedent.get("ORG") or antecedent.get("NORP") or antecedent.get("PERSON_SINGULAR")
 
         return None
+
+    # ------------------------------------------------------------------
+    # Step 3b — Advanced LLM Coreference Resolution
+    # ------------------------------------------------------------------
+
+    def _resolve_coreferences_llm(self, text: str) -> str:
+        """
+        Uses an LLM to rewrite the text, resolving all ambiguous pronouns and
+        references ('it', 'they', 'the organization') into explicit names.
+        This is expensive but greatly improves triplet extraction accuracy.
+        """
+        if self.llm is None or not text.strip():
+            return text
+
+        logger.info("[preprocessor] Running LLM-based coreference resolution...")
+        
+        # We cap text size for a single LLM call
+        MAX_CHARS = 4000
+        if len(text) <= MAX_CHARS:
+            return self._llm_coref_pass(text)
+
+        # For longer texts, process in chunks
+        parts = []
+        for i in range(0, len(text), MAX_CHARS - 200):
+            chunk = text[i : i + MAX_CHARS]
+            parts.append(self._llm_coref_pass(chunk))
+        return "\n".join(parts)
+
+    def _llm_coref_pass(self, text: str) -> str:
+        prompt = (
+            "You are a linguistic expert. Rewrite the text below to resolve all "
+            "ambiguous coreferences (it, they, he, she, the company, this system) "
+            "with their specific entity names found in context.\n\n"
+            "Rules:\n"
+            "- Be surgical: only change pronouns/ambiguous references to their proper names.\n"
+            "- Preserve all other technical details, numbers, and punctuation exactly.\n"
+            "- If a reference is truly ambiguous, leave it as is.\n\n"
+            f"Original Text:\n{text}\n\n"
+            "Rewritten Text:"
+        )
+        try:
+            response = self.llm.complete(prompt).text.strip()
+            if response:
+                return response
+        except Exception as e:
+            logger.warning("[preprocessor] LLM coref resolution call failed: %s", e)
+        return text
 
     # ------------------------------------------------------------------
     # Step 4 — Final whitespace normalization

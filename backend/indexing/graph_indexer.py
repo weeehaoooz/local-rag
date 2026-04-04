@@ -27,6 +27,14 @@ from indexing.graph_extractor import (
     _build_extractors_from_guardrails,
 )
 from indexing.graph_cleaner import GraphCleaner
+from indexing.community import (
+    build_networkx_graph,
+    detect_communities,
+    write_communities_to_neo4j,
+    summarize_communities,
+    CommunitySummarizer,
+)
+
 class GraphIndexer(BaseIndexer):
     """Indexer for Property Graph (Neo4j) using PropertyGraphIndex."""
 
@@ -736,6 +744,66 @@ class GraphIndexer(BaseIndexer):
             embed_model=Settings.embed_model
         )
         cleaner.run_cleanup(similarity_threshold, rel_threshold=rel_threshold)
+
+    def detect_and_summarize_communities(self) -> List[Document]:
+        """
+        Runs the full GraphRAG community detection and summarization pipeline.
+        
+        Steps:
+        1. Build NetworkX graph from Neo4j.
+        2. Detect communities using Louvain.
+        3. Write community IDs back to Neo4j nodes.
+        4. Generate LLM summaries for each community.
+        5. Return summaries as LlamaIndex Documents for vector indexing.
+        """
+        if not isinstance(self.storage_context.property_graph_store, Neo4jPropertyGraphStore):
+            print("Community detection only supported for Neo4jPropertyGraphStore.")
+            return []
+
+        store = self.storage_context.property_graph_store
+        
+        # 1. Build & Cluster
+        G = build_networkx_graph(store)
+        if G.number_of_nodes() == 0:
+            print("     No nodes found in graph. Skipping community detection.")
+            return []
+            
+        node_to_community = detect_communities(G)
+        
+        # 2. Persist community IDs
+        write_communities_to_neo4j(store, node_to_community)
+        
+        # 3. Summarize
+        summarize_communities(store, G, node_to_community)
+        
+        # 4. Export summaries as Documents
+        summarizer = CommunitySummarizer(store)
+        all_summaries = summarizer.get_all_summaries()
+        
+        summary_docs = []
+        for s in all_summaries:
+            cid = s.get("community_id")
+            text = s.get("summary", "")
+            entities = s.get("key_entities", "")
+            count = s.get("entity_count", 0)
+            
+            doc_text = (
+                f"Community {cid} (Theme Summary)\n"
+                f"Size: {count} entities\n"
+                f"Key Entities: {entities}\n\n"
+                f"{text}"
+            )
+            
+            metadata = {
+                "source_type": "community_summary",
+                "community_id": cid,
+                "entity_count": count,
+                "key_entities": entities,
+            }
+            
+            summary_docs.append(Document(text=doc_text, metadata=metadata, id_=f"community_{cid}"))
+            
+        return summary_docs
 
 
 # ===========================================================================
