@@ -24,14 +24,16 @@ class ResearchPlanner:
         """
         if mode == "deep":
             mode_instruction = (
-                "Generate a comprehensive mix of queries. "
-                "For each query, assign it to the most appropriate backend: 'arxiv' or 'web'."
+                "Generate a comprehensive mix of queries. Balanced research across multiple types of sources. "
+                "For each query, assign it to the most appropriate backend: 'arxiv', 'web', 'news', 'wiki', or 'local'."
             )
         else:
             mode_instruction = {
                 "arxiv": "Professional-grade ArXiv search strings for academic papers.",
                 "web": "Optimized for general web search for latest articles and reports.",
                 "news": "Focus on latest news, company announcements, and recent events.",
+                "wiki": "Focus on Wikipedia for authoritative definitions and historical context.",
+                "local": "Search within the user's local knowledge base or uploaded documents.",
             }.get(mode, "General search queries.")
 
         prompt = PLANNING_PROMPT.format(
@@ -159,11 +161,19 @@ class ResearchPlanner:
     def _fallback_plan(self, topic: str, mode: str) -> Dict:
         if mode == "deep":
             fallback_queries = [
-                {"query": f"{topic} research survey", "backend": "arxiv"},
-                {"query": f"{topic} latest developments 2024", "backend": "web"},
+                {"query": f"{topic} core concepts and history", "backend": "wiki"},
+                {"query": f"{topic} research survey and academic state of state", "backend": "arxiv"},
+                {"query": f"{topic} latest news 2024", "backend": "news"},
+                {"query": f"internal documentation about {topic}", "backend": "local"},
+                {"query": f"{topic} overview and tutorials", "backend": "web"},
             ]
+        elif mode == "wiki":
+            fallback_queries = [f"{topic} wikipedia", f"History of {topic}"]
+        elif mode == "local":
+            fallback_queries = [topic, f"{topic} internal context"]
         else:
             fallback_queries = [topic, f"latest news on {topic}"]
+        
         return {
             "objective": f"Researching {topic} ({mode})",
             "queries": fallback_queries,

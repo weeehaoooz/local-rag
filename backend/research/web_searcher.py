@@ -55,7 +55,7 @@ class WebSearcher:
                 raw = self._search_with_retry(
                     ddgs,
                     ddgs.text,
-                    keywords=query,
+                    query=query,
                     max_results=self.max_results,
                 )
                 for r in raw:
@@ -85,7 +85,7 @@ class WebSearcher:
                 raw = self._search_with_retry(
                     ddgs,
                     ddgs.news,
-                    keywords=query,
+                    query=query,
                     max_results=self.max_results,
                 )
                 for r in raw:
@@ -118,7 +118,7 @@ class WebSearcher:
                 raw = self._search_with_retry(
                     ddgs,
                     ddgs.text,
-                    keywords=query,
+                    query=query,
                     max_results=2,
                 )
                 for r in raw:
@@ -128,6 +128,38 @@ class WebSearcher:
                             "link": r["href"],
                             "snippet": r["body"],
                             "source": "dictionary",
+                        })
+                        seen_links.add(r["href"])
+
+        return results
+
+    def search_wikipedia(self, queries: List[str]) -> List[Dict]:
+        """
+        Targeted search for Wikipedia articles to get authoritative summaries.
+        """
+        results: List[Dict] = []
+        seen_links: set = set()
+
+        with DDGS() as ddgs:
+            for i, query in enumerate(queries):
+                if i > 0:
+                    time.sleep(1.0)
+
+                # Force wikipedia.org results
+                wiki_query = f"site:wikipedia.org {query}"
+                raw = self._search_with_retry(
+                    ddgs,
+                    ddgs.text,
+                    query=wiki_query,
+                    max_results=self.max_results,
+                )
+                for r in raw:
+                    if r["href"] not in seen_links and "wikipedia.org" in r["href"]:
+                        results.append({
+                            "title": r["title"].replace(" - Wikipedia", ""),
+                            "link": r["href"],
+                            "snippet": r["body"],
+                            "source": "wikipedia",
                         })
                         seen_links.add(r["href"])
 

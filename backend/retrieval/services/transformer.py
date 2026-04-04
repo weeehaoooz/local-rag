@@ -11,7 +11,7 @@ class QueryTransformer:
     def __init__(self, llm):
         self.llm = llm
 
-    def resolve_coreference(self, query: str, history: list[dict] = None) -> str:
+    async def resolve_coreference(self, query: str, history: list[dict] = None) -> str:
         """
         Rewrites a query to replace pronouns (it, they, them, he, she) or 
         ambiguous references (that, this) with explicit entities from the chat history.
@@ -46,7 +46,7 @@ class QueryTransformer:
         )
 
         try:
-            response = self.llm.complete(prompt)
+            response = await self.llm.acomplete(prompt)
             rewritten = response.text.strip().strip('"\'')
             if rewritten and len(rewritten) > 2:
                 if rewritten.lower() != query.lower():
@@ -57,7 +57,7 @@ class QueryTransformer:
 
         return query
 
-    def generate_hyde_document(self, query: str) -> str:
+    async def generate_hyde_document(self, query: str) -> str:
         """
         Generates a Hypothetical Document Embedding (HyDE) string.
         By creating a hallucinated 'ideal' answer to the query, vector semantic 
@@ -73,7 +73,7 @@ class QueryTransformer:
         )
 
         try:
-            response = self.llm.complete(prompt)
+            response = await self.llm.acomplete(prompt)
             hyde_doc = response.text.strip()
             
             # Combine the original query with the hallucinated document.

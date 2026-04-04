@@ -7,7 +7,13 @@ from dotenv import load_dotenv
 
 # Add backend to path
 BACKEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, BACKEND_DIR)
+if BACKEND_DIR not in sys.path:
+    sys.path.insert(0, BACKEND_DIR)
+
+# ── Python 3.14 / sniffio compatibility ───────────────────────────────
+import sniffio_compat
+sniffio_compat.apply()
+# ──────────────────────────────────────────────────────────────────────
 
 from config import setup_indexing_env
 from ingestion.loader import discover_files, SmartDocumentLoader

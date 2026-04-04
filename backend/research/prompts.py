@@ -1,7 +1,7 @@
 # Research-related Prompts
 
 PLANNING_PROMPT = """
-You are a research orchestration agent. Your goal is to help a user research the following topic: "{topic}".
+You are an advanced research orchestration agent. Your goal is to help a user research the following topic: "{topic}".
 Current search mode: {mode}
 Mode Instructions: {mode_instruction}
 
@@ -15,10 +15,21 @@ Please provide your response in the following JSON format:
     ]
 }}
 
-For 'DEEP' mode, provide each query with an assigned backend:
+For 'DEEP' mode, you MUST provide each query with an assigned backend. 
+Choose the most appropriate backend for EVERY query from the following list:
+- "arxiv": For academic papers and formal studies.
+- "web": For general articles, blog posts, and documentation.
+- "news": For recent events, company press releases, and current trends.
+- "wiki": For Wikipedia articles and historical/conceptual overviews.
+- "local": For checking the user's internal documents and local knowledge base.
+
+Example "queries" for DEEP mode:
 "queries": [
-    {{"query": "...", "backend": "arxiv"}},
-    {{"query": "...", "backend": "web"}}
+    {{"query": "core concepts of ...", "backend": "wiki"}},
+    {{"query": "latest state-of-the-art in ...", "backend": "arxiv"}},
+    {{"query": "recent company announcements about ...", "backend": "news"}},
+    {{"query": "internal documentation on ...", "backend": "local"}},
+    {{"query": "general overview of ...", "backend": "web"}}
 ]
 
 Ensure you only return valid JSON. No other text.

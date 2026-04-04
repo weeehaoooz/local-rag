@@ -161,7 +161,7 @@ class HybridEngine:
         Async version of get_context. Uses aretrieve() for all LlamaIndex
         retrievers so we never call asyncio.run() inside a running event loop.
         """
-        plan = self.orchestrator.plan_tools(query)
+        plan = await self.orchestrator.plan_tools(query)
         tools = plan.tools
         query_type = plan.fallback_query_type
         print(f"  [Orchestrator] Tools: {tools} | Fallback: {query_type.value} | Rationale: {plan.rationale}")
@@ -183,7 +183,7 @@ class HybridEngine:
         vector_candidates = []
         if self.vector_index and "vector_search" in tools:
             # HyDE for local semantic search
-            vector_query = self.transformer.generate_hyde_document(query)
+            vector_query = await self.transformer.generate_hyde_document(query)
             nodes = await self.vector_index.as_retriever(similarity_top_k=5).aretrieve(vector_query)
             vector_candidates = _to_dicts(nodes)
             all_sources.extend(self.formatter.extract_sources(nodes))
@@ -326,10 +326,10 @@ class HybridEngine:
 
         # 1. Transform: Coreference Resolution
         history = history or []
-        resolved_query = self.transformer.resolve_coreference(user_message, history)
+        resolved_query = await self.transformer.resolve_coreference(user_message, history)
 
         # 2. Decompose: Split compound queries
-        sub_queries = self.decomposer.split_query(resolved_query)
+        sub_queries = await self.decomposer.split_query(resolved_query)
 
         # Container for pooled contexts
         all_context = {
@@ -348,7 +348,7 @@ class HybridEngine:
 
             # Grading loop per sub-query
             for loop in range(max_reflection_loops):
-                r_grade = self.reflection.grade_retrieval(sq, sq_chunks)
+                r_grade = await self.reflection.grade_retrieval(sq, sq_chunks)
                 print(f"  [Reflection] Retrieval grade for '{sq}' (loop {loop}): relevant={r_grade.relevant} — {r_grade.reason}")
 
                 if r_grade.relevant:
@@ -358,7 +358,7 @@ class HybridEngine:
                 reflection_loops += 1
 
                 if loop < max_reflection_loops - 1:
-                    sq = self.reflection.rewrite_query(sq, r_grade.reason)
+                    sq = await self.reflection.rewrite_query(sq, r_grade.reason)
                     print(f"  [Reflection] Rewritten sub-query: {sq}")
                     sq_context = await self.get_context_async(sq)
                     sq_chunks = self._collect_context_texts(sq_context)
@@ -385,12 +385,11 @@ class HybridEngine:
             all_context_chunks.extend(sq_chunks)
 
         # ── Answer generation ────────────────────────────────────────────
-        loop = asyncio.get_event_loop()
         full_prompt = self._build_prompt(all_context, user_message, system_prompt)
         
         # Track time for TPS
         start_t = time.time()
-        response = await loop.run_in_executor(None, lambda: self.llm.complete(full_prompt))
+        response = await self.llm.acomplete(full_prompt)
         end_t = time.time()
         answer_text = response.text
         
@@ -404,7 +403,7 @@ class HybridEngine:
         tps = completion_tkns / ans_duration if ans_duration > 0 else 0.0
 
         # ── Answer grounding check ───────────────────────────────────────
-        a_grade = self.reflection.grade_answer(user_message, all_context_chunks, answer_text)
+        a_grade = await self.reflection.grade_answer(user_message, all_context_chunks, answer_text)
         print(f"  [Reflection] Answer grade: grounded={a_grade.grounded} — {a_grade.reason}")
 
         if not a_grade.grounded and reflection_loops < max_reflection_loops:
@@ -412,7 +411,7 @@ class HybridEngine:
             reflection_loops += 1
             print("  [Reflection] Answer ungrounded — attempting one corrective rewrite.")
 
-            corrective_query = self.reflection.rewrite_query(
+            corrective_query = await self.reflection.rewrite_query(
                 user_message,
                 failure_reason=f"The answer was ungrounded. Reason: {a_grade.reason}. Retrieve factual information to correct this."
             )
@@ -420,9 +419,9 @@ class HybridEngine:
             corrective_chunks = self._collect_context_texts(corrective_context)
 
             corrective_prompt = self._build_prompt(corrective_context, user_message, system_prompt)
-            corrective_response = await loop.run_in_executor(None, lambda: self.llm.complete(corrective_prompt))
+            corrective_response = await self.llm.acomplete(corrective_prompt)
 
-            final_a_grade = self.reflection.grade_answer(user_message, corrective_chunks, corrective_response.text)
+            final_a_grade = await self.reflection.grade_answer(user_message, corrective_chunks, corrective_response.text)
 
             if final_a_grade.grounded:
                 answer_text = corrective_response.text
@@ -472,10 +471,10 @@ class HybridEngine:
 
         yield _yield_status("Resolving coreferences...")
         history = history or []
-        resolved_query = self.transformer.resolve_coreference(user_message, history)
+        resolved_query = await self.transformer.resolve_coreference(user_message, history)
 
         yield _yield_status("Decomposing queries...")
-        sub_queries = self.decomposer.split_query(resolved_query)
+        sub_queries = await self.decomposer.split_query(resolved_query)
 
         all_context = {
             "graph_context": [], "vector_context": [], "summary_context": [],
@@ -495,7 +494,7 @@ class HybridEngine:
 
             for loop_idx in range(max_reflection_loops):
                 yield _yield_status(f"Grading retrieval (Loop {loop_idx+1})")
-                r_grade = self.reflection.grade_retrieval(sq, sq_chunks)
+                r_grade = await self.reflection.grade_retrieval(sq, sq_chunks)
 
                 if r_grade.relevant:
                     break
@@ -505,7 +504,7 @@ class HybridEngine:
 
                 if loop_idx < max_reflection_loops - 1:
                     yield _yield_status("Rewriting query...")
-                    sq = self.reflection.rewrite_query(sq, r_grade.reason)
+                    sq = await self.reflection.rewrite_query(sq, r_grade.reason)
                     yield _yield_status("Re-retrieving context...")
                     sq_context = await self.get_context_async(sq)
                     sq_chunks = self._collect_context_texts(sq_context)
@@ -546,14 +545,14 @@ class HybridEngine:
         tps = token_count / ans_duration if ans_duration > 0 else 0.0
 
         yield _yield_status("Evaluating groundedness...")
-        a_grade = self.reflection.grade_answer(user_message, all_context_chunks, answer_text)
+        a_grade = await self.reflection.grade_answer(user_message, all_context_chunks, answer_text)
 
         if not a_grade.grounded and reflection_loops < max_reflection_loops:
             answer_grade_result = "ungrounded"
             reflection_loops += 1
             yield _yield_status("Answer ungrounded, correcting...")
 
-            corrective_query = self.reflection.rewrite_query(
+            corrective_query = await self.reflection.rewrite_query(
                 user_message,
                 failure_reason=f"The answer was ungrounded. Reason: {a_grade.reason}."
             )
@@ -561,7 +560,7 @@ class HybridEngine:
             corrective_chunks = self._collect_context_texts(corrective_context)
             corrective_prompt = self._build_prompt(corrective_context, user_message, system_prompt)
 
-            yield _yield_status("Generating correction...", tokens=0)
+            yield _yield_status("Generating answer...", tokens=0)
             cor_gen = await self.llm.astream_complete(corrective_prompt)
             cor_text = ""
             cor_tokens = 0
@@ -569,9 +568,9 @@ class HybridEngine:
                 cor_text += chunk.delta
                 cor_tokens += 1
                 if cor_tokens % 5 == 0:
-                    yield _yield_status("Generating correction...", tokens=cor_tokens)
+                    yield _yield_status("Generating answer...", tokens=cor_tokens)
 
-            final_a_grade = self.reflection.grade_answer(user_message, corrective_chunks, cor_text)
+            final_a_grade = await self.reflection.grade_answer(user_message, corrective_chunks, cor_text)
 
             if final_a_grade.grounded:
                 answer_text = cor_text

@@ -57,7 +57,7 @@ class ReflectionService:
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
-    def grade_retrieval(self, query: str, context_chunks: list[str]) -> RetrievalGrade:
+    async def grade_retrieval(self, query: str, context_chunks: list[str]) -> RetrievalGrade:
         """
         Evaluate whether a list of retrieved context chunks contains sufficient
         information to answer the query.
@@ -89,9 +89,10 @@ class ReflectionService:
             f"Retrieved Context:\n{combined}"
         )
 
-        return self._parse_retrieval_grade(self._call_llm(prompt))
+        llm_response = await self._call_llm(prompt)
+        return self._parse_retrieval_grade(llm_response)
 
-    def rewrite_query(self, original_query: str, failure_reason: str) -> str:
+    async def rewrite_query(self, original_query: str, failure_reason: str) -> str:
         """
         Produce an improved version of a query that failed the retrieval grade.
 
@@ -113,7 +114,8 @@ class ReflectionService:
             "Return ONLY the rewritten query as plain text. No preamble, no quotes."
         )
 
-        rewritten = self._call_llm(prompt).strip().strip('"\'')
+        llm_response = await self._call_llm(prompt)
+        rewritten = llm_response.strip().strip('"\'')
         if not rewritten or len(rewritten) < 5:
             logger.warning("[Reflection] Query rewrite produced empty output; using original.")
             return original_query
@@ -121,7 +123,7 @@ class ReflectionService:
         logger.info(f"[Reflection] Query rewritten: '{original_query}' → '{rewritten}'")
         return rewritten
 
-    def grade_answer(self, query: str, context_chunks: list[str], answer: str) -> AnswerGrade:
+    async def grade_answer(self, query: str, context_chunks: list[str], answer: str) -> AnswerGrade:
         """
         Check whether the generated answer is grounded in the retrieved context
         (hallucination detection).
@@ -150,14 +152,15 @@ class ReflectionService:
             f"AI Answer:\n{answer}"
         )
 
-        return self._parse_answer_grade(self._call_llm(prompt))
+        llm_response = await self._call_llm(prompt)
+        return self._parse_answer_grade(llm_response)
 
     # ── Private helpers ────────────────────────────────────────────────────────
 
-    def _call_llm(self, prompt: str) -> str:
+    async def _call_llm(self, prompt: str) -> str:
         """Call the LLM and return the raw text response."""
         try:
-            response = self.llm.complete(prompt)
+            response = await self.llm.acomplete(prompt)
             return response.text.strip()
         except Exception as e:
             logger.error(f"[Reflection] LLM call failed: {e}")

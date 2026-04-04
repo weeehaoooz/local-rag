@@ -7,7 +7,13 @@ from collections import defaultdict
 
 # Add backend to path for imports
 BACKEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, BACKEND_DIR)
+if BACKEND_DIR not in sys.path:
+    sys.path.insert(0, BACKEND_DIR)
+
+# ── Python 3.14 / sniffio compatibility ───────────────────────────────
+import sniffio_compat
+sniffio_compat.apply()
+# ──────────────────────────────────────────────────────────────────────
 
 from llama_index.graph_stores.neo4j import Neo4jPropertyGraphStore
 from llama_index.core import StorageContext, Settings

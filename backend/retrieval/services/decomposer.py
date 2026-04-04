@@ -13,7 +13,7 @@ class QueryDecomposer:
     def __init__(self, llm):
         self.llm = llm
 
-    def split_query(self, query: str) -> list[str]:
+    async def split_query(self, query: str) -> list[str]:
         """
         Inspects the query. If it is complex (e.g. asking for comparisons, multiple
         unrelated facts, or step-by-step reasoning), splits it into 2-3 simpler
@@ -36,7 +36,7 @@ class QueryDecomposer:
         )
 
         try:
-            response = self.llm.complete(prompt)
+            response = await self.llm.acomplete(prompt)
             raw_text = response.text.strip()
             
             # Clean possible markdown formatting

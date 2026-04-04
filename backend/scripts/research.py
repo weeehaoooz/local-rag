@@ -8,12 +8,24 @@ BACKEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 
+# ── Python 3.14 / sniffio compatibility ───────────────────────────────
+import sniffio_compat
+sniffio_compat.apply()
+# ──────────────────────────────────────────────────────────────────────
+
 from research.planner import ResearchPlanner
 from research.searcher import ResearchSearcher
 from research.downloader import ResearchDownloader
 from research.web_searcher import WebSearcher
 from research.scraper import WebScraper
 from config import DATA_DIR
+
+# Optional import for HybridEngine (Local RAG)
+try:
+    from retrieval.engine import HybridEngine
+    HAS_HYBRID_ENGINE = True
+except ImportError:
+    HAS_HYBRID_ENGINE = False
 
 from rich.console import Console
 from rich.panel import Panel
@@ -33,7 +45,8 @@ class ResearchCLI:
         self.pdf_downloader = ResearchDownloader(data_dir=os.path.join(DATA_DIR, "research"))
         self.web_scraper = WebScraper(data_dir=os.path.join(DATA_DIR, "web_research"))
 
-        self.mode = "arxiv"  # arxiv, web, news, deep
+        self.mode = "deep"  # deep, arxiv, web, wiki, news, local
+        self.engine = None  # Lazily loaded HybridEngine
         self.current_topic = None
         self.results: List[Dict] = []
         self.plan: Dict = {}
@@ -56,7 +69,7 @@ class ResearchCLI:
         table.add_column("Command", style="bold green")
         table.add_column("Description")
         table.add_row("/topic <topic>", "Start research on a specific topic.")
-        table.add_row("/mode <mode>", "Switch between [yellow]arxiv, web, news, deep[/].")
+        table.add_row("/mode <mode>", "Switch between [yellow]deep, arxiv, web, wiki, news, local[/].")
         table.add_row("/ask <query>", "Ask a question about the current research findings.")
         table.add_row("/analyze <idx>", "Get a deep-dive analysis of a specific result.")
         table.add_row("/refine <feedback>", "Refine the current research plan.")
@@ -125,6 +138,15 @@ class ResearchCLI:
                 labels.append(str(q))
         return labels
 
+    def _ensure_engine(self):
+        if not HAS_HYBRID_ENGINE:
+            self.console.print("[yellow]Warning: HybridEngine not available (dependencies missing).[/]")
+            return False
+        if self.engine is None:
+            with self.console.status("[bold magenta]Initializing Local RAG Engine...[/]"):
+                self.engine = HybridEngine()
+        return True
+
     def execute_search(self):
         # 2. Searching phase
         with self.console.status(f"[bold yellow]Searching {self.mode.upper()}...[/]", spinner="earth"):
@@ -134,13 +156,50 @@ class ResearchCLI:
                 self.results = self.web_searcher.search_text(self.plan["queries"])
             elif self.mode == "news":
                 self.results = self.web_searcher.search_news(self.plan["queries"])
+            elif self.mode == "wiki":
+                self.results = self.web_searcher.search_wikipedia(self.plan["queries"])
+            elif self.mode == "local":
+                if self._ensure_engine():
+                    import asyncio
+                    local_res = []
+                    for q in self.plan["queries"]:
+                        # HybridEngine.get_context_async returns a dict
+                        ctx = asyncio.run(self.engine.get_context_async(q))
+                        # Transform RAG context to research result format
+                        for text, source in ctx.get("vector_context", []):
+                            local_res.append({
+                                "title": f"Local Context: {source}",
+                                "snippet": text,
+                                "source": "local",
+                                "link": source
+                            })
+                    self.results = local_res
             elif self.mode == "deep":
                 arxiv_queries = [q["query"] for q in self.plan["queries"] if isinstance(q, dict) and q.get("backend") == "arxiv"]
                 web_queries = [q["query"] for q in self.plan["queries"] if isinstance(q, dict) and q.get("backend") == "web"]
+                news_queries = [q["query"] for q in self.plan["queries"] if isinstance(q, dict) and q.get("backend") == "news"]
+                wiki_queries = [q["query"] for q in self.plan["queries"] if isinstance(q, dict) and q.get("backend") == "wiki"]
+                local_queries = [q["query"] for q in self.plan["queries"] if isinstance(q, dict) and q.get("backend") == "local"]
                 
                 arxiv_res = self.arxiv_searcher.search(arxiv_queries) if arxiv_queries else []
                 web_res = self.web_searcher.search_text(web_queries) if web_queries else []
-                self.results = self._deduplicate(arxiv_res + web_res)
+                news_res = self.web_searcher.search_news(news_queries) if news_queries else []
+                wiki_res = self.web_searcher.search_wikipedia(wiki_queries) if wiki_queries else []
+                
+                local_res = []
+                if local_queries and self._ensure_engine():
+                    import asyncio
+                    for q in local_queries:
+                        ctx = asyncio.run(self.engine.get_context_async(q))
+                        for text, source in ctx.get("vector_context", []):
+                            local_res.append({
+                                "title": f"Local: {source}",
+                                "snippet": text,
+                                "source": "local",
+                                "link": source
+                            })
+                
+                self.results = self._deduplicate(arxiv_res + web_res + news_res + wiki_res + local_res)
 
         if not self.results:
             self.console.print("[bold red]No results found.[/]")
@@ -235,7 +294,7 @@ class ResearchCLI:
                     elif cmd == "/mode":
                         if len(parts) > 1:
                             new_mode = parts[1].lower()
-                            if new_mode in ["arxiv", "web", "news", "deep"]:
+                            if new_mode in ["arxiv", "web", "news", "wiki", "local", "deep"]:
                                 self.mode = new_mode
                                 self.console.print(f"[green]Switched to [bold]{new_mode.upper()}[/] mode.[/]")
                             else:
@@ -290,7 +349,7 @@ class ResearchCLI:
 def main():
     parser = argparse.ArgumentParser(description="Research Engine CLI")
     parser.add_argument("--topic", type=str, help="Research topic to run immediately")
-    parser.add_argument("--mode", type=str, default="arxiv", help="Initial mode (arxiv, web, news, deep)")
+    parser.add_argument("--mode", type=str, default="deep", help="Initial mode (deep, arxiv, web, wiki, news, local)")
     args = parser.parse_args()
 
     cli = ResearchCLI()

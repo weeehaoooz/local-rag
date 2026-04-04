@@ -48,7 +48,7 @@ class ToolOrchestrator:
         self.llm = llm
         self.fail_open = fail_open
         
-    def plan_tools(self, query: str) -> ToolPlan:
+    async def plan_tools(self, query: str) -> ToolPlan:
         """
         Produce a plan of tools to use to answer the query.
         """
@@ -73,7 +73,7 @@ class ToolOrchestrator:
         )
 
         try:
-            response = self.llm.complete(prompt)
+            response = await self.llm.acomplete(prompt)
             raw_text = response.text.strip()
             
             # Clean possible markdown formatting
