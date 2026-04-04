@@ -1,11 +1,11 @@
-import os
-import json
-import logging
-from dotenv import load_dotenv
 import nest_asyncio
-
 # Apply nest_asyncio to handle nested event loops in llama-index
 nest_asyncio.apply()
+
+import os
+import asyncio
+import logging
+from dotenv import load_dotenv
 
 from llama_index.core import (
     PropertyGraphIndex, StorageContext, Settings, load_index_from_storage,
@@ -31,6 +31,7 @@ from research.searcher import ResearchSearcher
 
 logger = logging.getLogger(__name__)
 
+
 class HybridEngine:
     """
     KG-RAG query engine that orchestrates retrieval across:
@@ -38,7 +39,7 @@ class HybridEngine:
       2. VectorStoreIndex (Semantic Search)
       3. SummaryIndex (Document Overviews)
       4. CommunitySummaries (GraphRAG Global Search)
-    
+
     It delegates specialized logic to helper services.
     """
 
@@ -146,27 +147,28 @@ class HybridEngine:
                     name = r.get("name") if isinstance(r, dict) else (r[0] if r else None)
                     if name:
                         suggestions.append(f"Tell me about {name}")
-            
+
             if not suggestions:
                 return ["What is in the knowledge base?", "Summarize the key themes."]
-            
+
             return suggestions[:limit]
         except Exception:
             return ["Tell me about the latest documents."]
 
-    def get_context(self, query: str) -> dict:
-        """Retrieve and fuse context from all indices based on Orchestrator plan."""
-        # NEW ORCHESTRATOR LOGIC
+    async def get_context_async(self, query: str) -> dict:
+        """
+        Async version of get_context. Uses aretrieve() for all LlamaIndex
+        retrievers so we never call asyncio.run() inside a running event loop.
+        """
         plan = self.orchestrator.plan_tools(query)
         tools = plan.tools
         query_type = plan.fallback_query_type
         print(f"  [Orchestrator] Tools: {tools} | Fallback: {query_type.value} | Rationale: {plan.rationale}")
 
-        # Fallback keyword extraction for graph seed expansion
         _, entity_hints = self.router.classify_query(query)
 
         all_sources = []
-        
+
         def _to_dicts(nodes):
             res = []
             for n in nodes:
@@ -179,28 +181,29 @@ class HybridEngine:
         # 1. Semantic (Vector) & Lexical (BM25)
         vector_candidates = []
         if self.vector_index and "vector_search" in tools:
-            # Apply HyDE specifically for local semantic search
+            # HyDE for local semantic search
             vector_query = self.transformer.generate_hyde_document(query)
-            nodes = self.vector_index.as_retriever(similarity_top_k=5).retrieve(vector_query)
+            nodes = await self.vector_index.as_retriever(similarity_top_k=5).aretrieve(vector_query)
             vector_candidates = _to_dicts(nodes)
             all_sources.extend(self.formatter.extract_sources(nodes))
 
         bm25_candidates = []
         if self.bm25_retriever and "vector_search" in tools:
-            nodes = self.bm25_retriever.retrieve(query)
+            # BM25Retriever doesn't have aretrieve — run in executor to avoid blocking
+            loop = asyncio.get_event_loop()
+            nodes = await loop.run_in_executor(None, self.bm25_retriever.retrieve, query)
             bm25_candidates = _to_dicts(nodes)
             all_sources.extend(self.formatter.extract_sources(nodes))
 
-        # 2. Knowledge Graph
+        # 2. Knowledge Graph — use aretrieve() to avoid nested asyncio.run()
         graph_candidates = []
         expanded_entities = []
         if "graph_search" in tools:
             kg_retriever = self.kg_index.as_retriever(include_text=True, similarity_top_k=5)
-            nodes = kg_retriever.retrieve(query)
+            nodes = await kg_retriever.aretrieve(query)
             graph_candidates = _to_dicts(nodes)
             all_sources.extend(self.formatter.extract_sources(nodes))
-            
-            # Seed expansion
+
             seeds = entity_hints + [n['metadata'].get('name') for n in graph_candidates if n['metadata'].get('name')]
             if seeds:
                 expanded_entities = self.graph_service.expand_graph_context(list(set(seeds)), max_hops=1)
@@ -213,15 +216,14 @@ class HybridEngine:
                 fused_results = self.fusion_service.reciprocal_rank_fusion(fusion_input)
                 top_fused = fused_results[:5]
                 fused_context = [(c["text"], c["source"]) for c in top_fused]
-                
-                # Expand from hits
+
                 traversal = self.graph_service.hybrid_graph_traversal(top_fused)
                 expanded_entities.extend(traversal.get("entities", []))
 
         # 4. Global Context (Summaries & Communities)
         summary_context = []
         if self.summary_index and "summary_search" in tools:
-            nodes = self.summary_index.as_retriever().retrieve(query)
+            nodes = await self.summary_index.as_retriever().aretrieve(query)
             summary_context = [(n.get_content(), "Summary") for n in nodes[:2]]
             all_sources.extend(self.formatter.extract_sources(nodes))
 
@@ -236,8 +238,8 @@ class HybridEngine:
             [(c["text"], c["source"]) for c in graph_candidates],
             expanded_entities
         )
-        
-        # 6. Web & ArXiv Context (NEW)
+
+        # 6. Web & ArXiv Context
         if "web_search" in tools and self.web_searcher:
             try:
                 print("  [Orchestrator] Running web_search...")
@@ -247,7 +249,7 @@ class HybridEngine:
                     all_sources.append({"title": r["title"], "category": "Web", "file": r["link"]})
             except Exception as e:
                 print(f"  [Orchestrator] web_search failed: {e}")
-                
+
         if "arxiv_search" in tools and self.arxiv_searcher:
             try:
                 print("  [Orchestrator] Running arxiv_search...")
@@ -270,10 +272,7 @@ class HybridEngine:
         }
 
     def _collect_context_texts(self, context: dict) -> list[str]:
-        """
-        Flatten the composite context dict into a plain list of text strings
-        for use by the ReflectionService graders.
-        """
+        """Flatten the composite context dict into a plain list of text strings."""
         chunks: list[str] = []
         for text, _ in context.get("graph_context", []):
             if text:
@@ -302,7 +301,7 @@ class HybridEngine:
         context_str = "\n\n".join(prompt_parts) if prompt_parts else "No relevant context found."
         return f"{system_prompt}\n\nContext:\n{context_str}\n\nUser: {user_message}\nAssistant:"
 
-    def chat(
+    async def chat_async(
         self,
         user_message: str,
         mode: str = "fast",
@@ -311,7 +310,7 @@ class HybridEngine:
         max_reflection_loops: int = 2,
     ) -> dict:
         """
-        Main entry point for chat interaction.
+        Async main entry point for chat interaction.
 
         Uses a Self-RAG / CRAG agentic loop:
           1. Retrieve context for the current query.
@@ -319,11 +318,6 @@ class HybridEngine:
           3. Generate an answer from the (graded) context.
           4. Grade the answer for hallucinations — if it fails, rewrite and retry.
           5. Return the final answer with reflection diagnostics.
-
-        Parameters
-        ----------
-        max_reflection_loops:
-            Maximum number of query-rewrite + re-retrieve cycles (default 2).
         """
         reflection_loops = 0
         retrieval_grade_result = "pass"
@@ -332,13 +326,13 @@ class HybridEngine:
         # 1. Transform: Coreference Resolution
         history = history or []
         resolved_query = self.transformer.resolve_coreference(user_message, history)
-        
+
         # 2. Decompose: Split compound queries
         sub_queries = self.decomposer.split_query(resolved_query)
 
         # Container for pooled contexts
         all_context = {
-            "graph_context": [], "vector_context": [], "summary_context": [], 
+            "graph_context": [], "vector_context": [], "summary_context": [],
             "community_context": [], "sources": [], "tools_used": [],
             "orchestrator_rationale": f"Decomposed {len(sub_queries)} queries.",
             "query_type": None
@@ -348,7 +342,7 @@ class HybridEngine:
         # ── Retrieval → Grade → (Rewrite + Retry) loop ───────────────────
         for sq in sub_queries:
             print(f"  [Agent] Processing sub-query: {sq}")
-            sq_context = self.get_context(sq)
+            sq_context = await self.get_context_async(sq)
             sq_chunks = self._collect_context_texts(sq_context)
 
             # Grading loop per sub-query
@@ -357,7 +351,7 @@ class HybridEngine:
                 print(f"  [Reflection] Retrieval grade for '{sq}' (loop {loop}): relevant={r_grade.relevant} — {r_grade.reason}")
 
                 if r_grade.relevant:
-                    break   # retrieval passed
+                    break  # retrieval passed
 
                 retrieval_grade_result = "fail"
                 reflection_loops += 1
@@ -365,7 +359,7 @@ class HybridEngine:
                 if loop < max_reflection_loops - 1:
                     sq = self.reflection.rewrite_query(sq, r_grade.reason)
                     print(f"  [Reflection] Rewritten sub-query: {sq}")
-                    sq_context = self.get_context(sq)
+                    sq_context = await self.get_context_async(sq)
                     sq_chunks = self._collect_context_texts(sq_context)
                 else:
                     print("  [Reflection] Max retrieval loops reached for sub-query.")
@@ -375,24 +369,24 @@ class HybridEngine:
             all_context["vector_context"].extend(sq_context.get("vector_context", []))
             all_context["summary_context"].extend(sq_context.get("summary_context", []))
             all_context["community_context"].extend(sq_context.get("community_context", []))
-            
-            # Deduplicate sources
+
             for src in sq_context.get("sources", []):
                 if src not in all_context["sources"]:
-                   all_context["sources"].append(src)
-                   
+                    all_context["sources"].append(src)
+
             for t in sq_context.get("tools_used", []):
                 if t not in all_context["tools_used"]:
                     all_context["tools_used"].append(t)
-            
+
             if not all_context["query_type"]:
                 all_context["query_type"] = sq_context.get("query_type")
-                
+
             all_context_chunks.extend(sq_chunks)
 
         # ── Answer generation ────────────────────────────────────────────
+        loop = asyncio.get_event_loop()
         full_prompt = self._build_prompt(all_context, user_message, system_prompt)
-        response = self.llm.complete(full_prompt)
+        response = await loop.run_in_executor(None, lambda: self.llm.complete(full_prompt))
         answer_text = response.text
 
         # ── Answer grounding check ───────────────────────────────────────
@@ -403,29 +397,25 @@ class HybridEngine:
             answer_grade_result = "ungrounded"
             reflection_loops += 1
             print("  [Reflection] Answer ungrounded — attempting one corrective rewrite.")
-            
-            # Corrective retrieval directly targets the user's main requirement
+
             corrective_query = self.reflection.rewrite_query(
                 user_message,
                 failure_reason=f"The answer was ungrounded. Reason: {a_grade.reason}. Retrieve factual information to correct this."
             )
-            corrective_context = self.get_context(corrective_query)
+            corrective_context = await self.get_context_async(corrective_query)
             corrective_chunks = self._collect_context_texts(corrective_context)
 
-            # Generate new answer with corrective context
             corrective_prompt = self._build_prompt(corrective_context, user_message, system_prompt)
-            corrective_response = self.llm.complete(corrective_prompt)
-            
-            # Final grade check
+            corrective_response = await loop.run_in_executor(None, lambda: self.llm.complete(corrective_prompt))
+
             final_a_grade = self.reflection.grade_answer(user_message, corrective_chunks, corrective_response.text)
-            
+
             if final_a_grade.grounded:
                 answer_text = corrective_response.text
-                all_context = corrective_context  # Update visible logic to use the corrective sources
+                all_context = corrective_context
                 answer_grade_result = "grounded"
         else:
             answer_grade_result = "grounded" if a_grade.grounded else "ungrounded"
-
 
         return {
             "response": answer_text,

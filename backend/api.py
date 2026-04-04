@@ -5,7 +5,13 @@ Usage:
     python api.py
     # or: uvicorn api:app --reload --host 0.0.0.0 --port 8000
 """
+# ── Python 3.14 / sniffio compatibility — MUST be first import ────────
+import sniffio_compat
+sniffio_compat.apply()
+# ──────────────────────────────────────────────────────────────────────
+
 import os
+import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,12 +39,12 @@ async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle."""
     global _ingest_manager
 
-    # Startup: pre-warm the engine
-    _get_engine()
+    # Startup: pre-warm the engine in a thread (constructor is sync/heavy)
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _get_engine)
 
     from config import DATA_DIR, STORAGE_DIR
 
-    # Startup: launch the background ingestion manager
     _ingest_manager = AsyncIngestionManager(
         data_dir=os.getenv("INGEST_DATA_DIR", DATA_DIR),
         storage_dir=os.getenv("INGEST_STORAGE_DIR", STORAGE_DIR),
@@ -49,11 +55,12 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Shutdown: stop ingestion manager then engine
+    # Shutdown
     if _ingest_manager is not None:
         await _ingest_manager.stop()
     if _engine is not None:
-        _engine.close()
+        if hasattr(_engine, 'close'):
+            _engine.close()
 
 
 # ── App ───────────────────────────────────────────────────────────────
@@ -111,11 +118,9 @@ class ChatResponse(BaseModel):
     graph_context: list[GraphNode] = []
     query_type: str = "LOCAL"
     suggested_prompts: list[str] = []
-    # Self-reflection diagnostics
     reflection_loops: int = 0
     retrieval_grade: str = "pass"
     answer_grade: str = "grounded"
-    # Orchestrator diagnostics
     tools_used: list[str] = []
     orchestrator_rationale: str = ""
 
@@ -134,28 +139,31 @@ class SuggestionResponse(BaseModel):
 
 # ── Routes ────────────────────────────────────────────────────────────
 @app.get("/api/health")
-def health_check():
+async def health_check():
     return {"status": "ok"}
 
 
 @app.get("/api/suggestions", response_model=SuggestionResponse)
-def get_suggestions():
+async def get_suggestions():
     engine = _get_engine()
-    suggs = engine.get_suggestions(limit=4)
+    loop = asyncio.get_running_loop()
+    suggs = await loop.run_in_executor(None, engine.get_suggestions, 4)
     return SuggestionResponse(suggestions=suggs)
 
 
 @app.post("/api/chat", response_model=ChatResponse)
-def chat(req: ChatRequest):
+async def chat(req: ChatRequest):
     if not req.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
 
     engine = _get_engine()
-    result = engine.chat(
-        req.message, 
-        mode=req.mode, 
-        history=req.history,
-        system_prompt=req.system_prompt
+
+    # Call the async engine method directly — no thread executor needed
+    result = await engine.chat_async(
+        req.message,
+        req.mode,
+        req.history,
+        req.system_prompt,
     )
 
     return ChatResponse(
@@ -174,30 +182,33 @@ def chat(req: ChatRequest):
 
 
 @app.post("/api/title", response_model=TitleResponse)
-def generate_title(req: TitleRequest):
+async def generate_title(req: TitleRequest):
     """Generate a short AI title for a conversation based on its first message."""
     engine = _get_engine()
-    try:
-        prompt = (
-            "Generate a concise, descriptive title (3-6 words max) for a conversation "
-            "that starts with this message. Return ONLY the title, no quotes, no punctuation at the end.\n\n"
-            f"Message: {req.first_message[:300]}"
-        )
-        title = engine.llm.complete(prompt).text.strip().strip('"\'').strip()
-        # Trim to a reasonable length
-        if len(title) > 60:
-            title = title[:60]
-        return TitleResponse(title=title)
-    except Exception as e:
-        print(f"Title generation failed: {e}")
-        return TitleResponse(title=req.first_message[:40] + ("..." if len(req.first_message) > 40 else ""))
+    loop = asyncio.get_running_loop()
+
+    def _do_work():
+        try:
+            prompt = (
+                "Generate a concise, descriptive title (3-6 words max) for a conversation "
+                "that starts with this message. Return ONLY the title, no quotes, no punctuation at the end.\n\n"
+                f"Message: {req.first_message[:300]}"
+            )
+            title = engine.llm.complete(prompt).text.strip().strip('"\'').strip()
+            if len(title) > 60:
+                title = title[:60]
+            return title
+        except Exception as e:
+            print(f"Title generation failed: {e}")
+            return req.first_message[:40] + ("..." if len(req.first_message) > 40 else "")
+
+    title = await loop.run_in_executor(None, _do_work)
+    return TitleResponse(title=title)
 
 
 # ── Ingestion Routes ───────────────────────────────────────────────────
-
 @app.get("/api/ingest/status")
-def ingest_status():
-    """Return the current ingestion pipeline status."""
+async def ingest_status():
     if _ingest_manager is None:
         raise HTTPException(status_code=503, detail="Ingestion manager not initialised.")
     return _ingest_manager.status()
@@ -205,7 +216,6 @@ def ingest_status():
 
 @app.post("/api/ingest/trigger")
 async def ingest_trigger():
-    """Manually trigger a scan of the data directory for new/changed files."""
     if _ingest_manager is None:
         raise HTTPException(status_code=503, detail="Ingestion manager not initialised.")
     queued = await _ingest_manager.trigger_scan()

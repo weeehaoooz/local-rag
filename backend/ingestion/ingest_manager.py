@@ -387,7 +387,7 @@ class AsyncIngestionManager:
         from ingestion.preprocessor import DocumentPreprocessor
         from indexing.vector import VectorIndexer
         from indexing.summary import SummaryIndexer
-        from indexing.graph import GraphIndexer
+        from indexing.graph_indexer import GraphIndexer
         from retrieval.guardrails import GuardrailManager
 
         import os as _os
