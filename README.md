@@ -4,6 +4,43 @@ This project implements an **Agentic Local RAG** (Retrieval-Augmented Generation
 
 It is built using **LlamaIndex** and **Ollama**, with **Neo4j** as the graph database backend.
 
+## 🧠 The Agentic Approach
+
+Unlike traditional "naive" RAG pipelines that execute a single, fixed `Embed -> Search -> Generate` sequence, this project implements a dynamic, autonomous **agentic architecture** capable of reasoning, planning, and self-correction. 
+
+1. **Reasoning & Planning**: Complex, multi-topic user questions are not blindly searched. An LLM Decomposer analyzes the intent and breaks the prompt down into parallel, independent sub-queries.
+2. **Tool-Calling Orchestration**: An intelligent Orchestrator acts as the "brain," evaluating each sub-query to dynamically dispatch specialized retrieval tools—autonomously routing between Local Vector Search, Neo4j Property Graph traversal, Web Search, or ArXiv Academic Search depending on the optimal data source.
+3. **Query Transformation**: Utilizing conversational memory, Coreference Resolution, and HyDE (Hypothetical Document Embeddings), the system automatically expands vague queries into highly targeted search vectors without user intervention.
+4. **Self-Reflection (Corrective RAG - CRAG)**: Retrieval isn't assumed to be successful. An Evaluator agent grades the retrieved context. If relevant information is missing, the system initiates a self-correction loop: rewriting the query and autonomously executing web or deep research to fill knowledge gaps.
+5. **Anti-Hallucination Guardrails**: Before output, the final generated response is fact-checked by the Evaluator against the retrieved context to guarantee groundedness and flag fabricated claims.
+6. **State Streaming**: The multi-step agentic workflow (e.g., *"Decomposing query"*, *"Grading context"*, *"Searching web"*) is streamed live to the UI, providing complete transparency into the system's thought process.
+
+---
+
+## 💡 The LightRAG Paradigm
+
+While the agentic orchestrator acts as the system's "brain," the underlying data structure and retrieval mechanics are driven by the **LightRAG** approach. This solves the limitations of both pure vector search (which struggles with holistic understanding) and traditional GraphRAG (which can be computationally expensive to build).
+
+- **Dual-Level Search**: The system natively supports two paradigms of knowledge graph traversal:
+  - **Local Retrieval**: Extracts specific, granular entities and their direct topological relationships (N-hop neighbors) to answer highly specific questions.
+  - **Global Retrieval**: Utilizes graph community detection to cluster related entities, generating pre-computed high-level summaries. This enables the system to answer broad, overarching questions that span across multiple documents.
+- **Incremental Knowledge Building**: Unlike traditional pipelines that require a full rebuild whenever new data is added, our implementation uses hash-tracking to seamlessly append only *new* entities and relationships to the existing graph.
+- **Efficient Extraction**: By filtering and optimizing the extracted graph topology, it maintains high retrieval accuracy without the exponential token costs of standard graph generation.
+
+---
+
+## 🗂️ The Indexing Flow & Considerations
+
+To ensure high-quality graph and vector retrieval, the data ingestion pipeline handles structural nuances *before* they reach the databases:
+
+- **Semantic Chunking for Coherence**: Instead of basic character-count splitting, the system evaluates logical sentence boundaries and topic shifts. This ensures that parent-child hierarchical chunks ("Small-to-Big" chunking strategy) retain their underlying meaning and prevent data fragmentation.
+- **Automated Coreference Resolution**: An LLM preprocessing step dynamically resolves ambiguous pronouns in the text (e.g., changing "it" to "the LlamaIndex framework" across paragraphs). This strictly prevents dangling or disconnected entities in the Neo4j Knowledge Graph.
+- **Vision-Based Metadata Extraction**: Before chunking, layout-heavy documents (like PDFs with tables or diagrams) are parsed to extract structural metadata, preserving spatial and tabular context.
+- **Actor-Critic KG Extraction**: During graph creation, an LLM extracts entities and relationships, while an independent "critic" loop fact-checks each generated triplet against the source text to block hallucinations.
+- **Incremental Indexing via Hashing**: The coordinator service tracks file hashes. When processing directories, it skips untouched files, seamlessly updating only modified or newly ingested documents.
+
+---
+
 ## 🚀 Features
 
 ### Core RAG Engine
