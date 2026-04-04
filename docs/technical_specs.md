@@ -87,7 +87,7 @@ The retrieval engine uses a router to determine the depth and breadth of the sea
 
 Information retrieved from both levels is fused and passed to the LLM:
 1. **Context Fusion**: Combines direct triplets, community themes, and document excerpts.
-2. **Synthesis**: LLM (Llama 3) generates a contextually rich response with integrated source citations.
+2. **Synthesis**: LLM (Gemma 4) generates a contextually rich response with integrated source citations.
 
 ## 6. Incremental Update Mechanism
 

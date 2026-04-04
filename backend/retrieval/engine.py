@@ -17,6 +17,7 @@ from llama_index.embeddings.ollama import OllamaEmbedding
 # Load environment variables
 load_dotenv()
 
+from config import DEFAULT_LLM, DEFAULT_EMBED
 from retrieval.services.router import RouterService, QueryType
 from retrieval.services.graph_service import GraphService
 from retrieval.services.fusion import RankFusionService
@@ -38,7 +39,7 @@ class HybridEngine:
     def __init__(self):
         # ── LLM & Embedding ───────────────────────────────────────────
         self.llm = Ollama(
-            model="llama3:latest",
+            model=DEFAULT_LLM,
             base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
             request_timeout=720.0,
             context_window=int(os.getenv("OLLAMA_CONTEXT_WINDOW", "8192")),
@@ -47,7 +48,7 @@ class HybridEngine:
             },
         )
         self.embed_model = OllamaEmbedding(
-            model_name="nomic-embed-text",
+            model_name=DEFAULT_EMBED,
             base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
             request_timeout=360.0,
         )

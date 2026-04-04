@@ -14,6 +14,7 @@ from llama_index.core import StorageContext, Settings
 from llama_index.llms.ollama import Ollama
 from llama_index.embeddings.ollama import OllamaEmbedding
 from indexing.graph_indexer import GraphIndexer
+from config import DEFAULT_LLM, DEFAULT_EMBED
 
 # Load environment variables
 load_dotenv()
@@ -21,14 +22,14 @@ load_dotenv()
 def setup_models():
     """Configure LLM and Embedding models for management tasks."""
     Settings.llm = Ollama(
-        model="llama3:latest",
+        model=DEFAULT_LLM,
         base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
         request_timeout=720.0,
         context_window=int(os.getenv("OLLAMA_CONTEXT_WINDOW", "8192")),
         additional_kwargs={"num_ctx": int(os.getenv("OLLAMA_CONTEXT_WINDOW", "8192"))},
     )
     Settings.embed_model = OllamaEmbedding(
-        model_name="nomic-embed-text",
+        model_name=DEFAULT_EMBED,
         base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
         request_timeout=360.0,
     )

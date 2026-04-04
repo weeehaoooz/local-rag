@@ -3,6 +3,7 @@ import sys
 import httpx
 from dotenv import load_dotenv
 from llama_index.graph_stores.neo4j import Neo4jGraphStore
+from config import DEFAULT_LLM, DEFAULT_EMBED
 
 # Load environment variables
 load_dotenv()
@@ -11,7 +12,7 @@ def check_ollama():
     """Check if Ollama service is reachable and has the required models."""
     print("--- Checking Ollama Service ---")
     base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    required_models = ["llama3:latest", "nomic-embed-text"]
+    required_models = [DEFAULT_LLM, DEFAULT_EMBED]
 
     try:
         response = httpx.get(f"{base_url}/api/tags")

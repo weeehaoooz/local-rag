@@ -1,5 +1,6 @@
 import ollama
 from retrieval.engine import HybridEngine
+from config import DEFAULT_LLM
 
 engine = HybridEngine()
 
@@ -23,7 +24,7 @@ def chat():
         """
         
         # Generate final response locally
-        response = ollama.generate(model='llama3', prompt=prompt)
+        response = ollama.generate(model=DEFAULT_LLM, prompt=prompt)
         print("\nAI RESPONSE:\n", response['response'])
 
 if __name__ == "__main__":

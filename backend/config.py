@@ -8,6 +8,12 @@ from llama_index.graph_stores.neo4j import Neo4jPropertyGraphStore
 BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(BACKEND_DIR)
 
+# ── Model Configuration ───────────────────────────────────────
+# Default models for the Ollama backend
+DEFAULT_LLM = "gemma4:latest"
+DEFAULT_EMBED = "nomic-embed-text"
+DEFAULT_VISION = "gemma4:latest"  # Multimodal model for images
+
 # Centralized storage directory at project root
 STORAGE_DIR = os.path.join(PROJECT_ROOT, "storage")
 DATA_DIR = os.path.join(BACKEND_DIR, "data")
@@ -26,7 +32,7 @@ os.makedirs(STORAGE_DIR, exist_ok=True)
 def setup_models():
     """Setup models and global settings."""
     llm = Ollama(
-        model="gemma4:latest",
+        model=DEFAULT_LLM,
         base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
         request_timeout=720.0,
         context_window=int(os.getenv("OLLAMA_CONTEXT_WINDOW", "8192")),
@@ -35,7 +41,7 @@ def setup_models():
         },
     )
     embed_model = OllamaEmbedding(
-        model_name="nomic-embed-text",
+        model_name=DEFAULT_EMBED,
         base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
         request_timeout=360.0,
     )

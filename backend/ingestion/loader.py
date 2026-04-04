@@ -26,6 +26,7 @@ import ollama
 from llama_index.core import SimpleDirectoryReader, Settings
 from llama_index.core.schema import Document
 import numpy as np
+from config import DEFAULT_VISION
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +147,7 @@ def _detect_sections(text: str) -> list[str]:
 # Vision Helper
 # ---------------------------------------------------------------------------
 
-def _describe_image_with_vision(image_bytes: bytes, model_name: str = "gemma4:latest") -> str:
+def _describe_image_with_vision(image_bytes: bytes, model_name: str = DEFAULT_VISION) -> str:
     """
     Use a multimodal LLM (via Ollama) to describe an image.
     Specifically prompted to extract data from charts and diagrams.
