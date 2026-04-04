@@ -22,19 +22,24 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 from rich.prompt import Prompt
 from rich import print as rprint
 
+
 class ResearchCLI:
     def __init__(self):
         self.console = Console()
         self.planner = ResearchPlanner()
         self.arxiv_searcher = ResearchSearcher(max_results_per_query=5)
         self.web_searcher = WebSearcher(max_results=5)
-        
+
         self.pdf_downloader = ResearchDownloader(data_dir=os.path.join(DATA_DIR, "research"))
         self.web_scraper = WebScraper(data_dir=os.path.join(DATA_DIR, "web_research"))
-        
-        self.mode = "arxiv" # arxiv, web, news
+
+        self.mode = "arxiv"  # arxiv, web, news, deep
         self.current_topic = None
-        self.results = []
+        self.results: List[Dict] = []
+
+    # ------------------------------------------------------------------
+    # UI helpers
+    # ------------------------------------------------------------------
 
     def display_welcome(self):
         self.console.print(Panel.fit(
@@ -56,50 +61,96 @@ class ResearchCLI:
         table.add_row("<any text>", "Treated as a research topic in current mode.")
         self.console.print(table)
 
+    # ------------------------------------------------------------------
+    # Core research logic
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _deduplicate(results: List[Dict]) -> List[Dict]:
+        """
+        Remove duplicate results across all sources.
+        ArXiv results are keyed by 'id'; web/news/dictionary by 'link'.
+        """
+        seen: set = set()
+        unique: List[Dict] = []
+        for r in results:
+            key = r.get("id") or r.get("link")
+            if key and key not in seen:
+                seen.add(key)
+                unique.append(r)
+        return unique
+
     def run_research(self, topic: str):
         self.current_topic = topic
-        
+
         # 1. Planning phase
-        with self.console.status(f"[bold yellow]Analyzing topic: {topic} ({self.mode}) via Ollama...[/]", spinner="dots"):
+        with self.console.status(
+            f"[bold yellow]Analyzing topic: {topic} ({self.mode}) via Ollama...[/]", spinner="dots"
+        ):
             plan = self.planner.generate_plan(topic, mode=self.mode)
-        
+
         self.console.print(f"\n[bold green]Research Objective:[/] {plan['objective']}")
-        self.console.print(f"[bold cyan]Planned Queries:[/] {', '.join(plan['queries'])}\n")
-        
+
+        # Pretty-print the planned queries, handling both str and dict formats
+        query_labels = []
+        for q in plan["queries"]:
+            if isinstance(q, dict):
+                query_labels.append(f"{q['query']} [dim]({q.get('backend', '?')})[/]")
+            else:
+                query_labels.append(str(q))
+        self.console.print(f"[bold cyan]Planned Queries:[/] {', '.join(query_labels)}\n")
+
         # 2. Searching phase
         with self.console.status(f"[bold yellow]Searching {self.mode.upper()}...[/]", spinner="earth"):
             if self.mode == "arxiv":
-                self.results = self.arxiv_searcher.search(plan['queries'])
+                self.results = self.arxiv_searcher.search(plan["queries"])
+
             elif self.mode == "web":
-                self.results = self.web_searcher.search_text(plan['queries'])
+                self.results = self.web_searcher.search_text(plan["queries"])
+
             elif self.mode == "news":
-                self.results = self.web_searcher.search_news(plan['queries'])
+                self.results = self.web_searcher.search_news(plan["queries"])
+
             elif self.mode == "deep":
-                # Deep mode combines ArXiv and Web
-                arxiv_queries = [q for q in plan['queries'] if any(x in q.lower() for x in ['arxiv', 'paper', 'journal'])]
-                web_queries = [q for q in plan['queries'] if q not in arxiv_queries]
-                
-                # If planner didn't distinguish, just split them
-                if not arxiv_queries:
-                    arxiv_queries = plan['queries'][:len(plan['queries'])//2]
-                    web_queries = plan['queries'][len(plan['queries'])//2:]
-                
-                self.results = self.arxiv_searcher.search(arxiv_queries)
-                self.results += self.web_searcher.search_text(web_queries)
+                # Route each query to its LLM-labelled backend
+                arxiv_queries: List[str] = []
+                web_queries: List[str] = []
+
+                for q in plan["queries"]:
+                    if isinstance(q, dict):
+                        backend = q.get("backend", "web").lower()
+                        query_str = q.get("query", "")
+                    else:
+                        # Fallback for plain-string queries (shouldn't happen in deep mode)
+                        backend = "web"
+                        query_str = str(q)
+
+                    if backend == "arxiv":
+                        arxiv_queries.append(query_str)
+                    else:
+                        web_queries.append(query_str)
+
+                self.console.print(
+                    f"[dim]  → ArXiv: {len(arxiv_queries)} queries | Web: {len(web_queries)} queries[/]"
+                )
+
+                arxiv_results = self.arxiv_searcher.search(arxiv_queries) if arxiv_queries else []
+                web_results = self.web_searcher.search_text(web_queries) if web_queries else []
+                self.results = self._deduplicate(arxiv_results + web_results)
 
         if not self.results:
             self.console.print(f"[bold red]No results found in {self.mode} mode.[/]")
             return
 
-        # 2.5 Terminology Discovery (Deep or Web mode)
-        if self.mode in ["deep", "web", "arxiv"]:
+        # 2.5 Terminology Discovery — only for web/news/deep (not pure arxiv)
+        if self.mode in ["deep", "web", "news"]:
             with self.console.status("[bold magenta]Discovering key terminologies...[/]", spinner="simpleDots"):
                 terms = self.planner.discover_terms(self.results)
                 if terms:
                     self.console.print(f"[bold magenta]Found technical terms:[/] {', '.join(terms)}")
                     definitions = self.web_searcher.search_definitions(terms)
-                    # Add definitions to the top of results
-                    self.results = definitions + self.results
+                    # Prepend definitions; deduplicate in case any def URL already appeared
+                    self.results = self._deduplicate(definitions + self.results)
 
         # 3. Display Results
         table = Table(title=f"{self.mode.upper()} Results for: {topic}", show_lines=True)
@@ -107,74 +158,86 @@ class ResearchCLI:
         table.add_column("Source", style="bold cyan")
         table.add_column("Title / Authors", style="bold white")
         table.add_column("Summary / Snippet", style="dim")
-        
+
         for i, r in enumerate(self.results, 1):
-            if r.get('result_obj'): # ArXiv
-                source = "ArXiv"
-                title_line = f"{r['title']}\n[italic]{', '.join(r['authors'][:2])}[/]"
-                content = r.get('summary', '')[:200] + "..."
+            source = r.get("source", "web").capitalize()
+
+            if r.get("source") == "arxiv":
+                title_line = f"{r['title']}\n[italic]{', '.join(r.get('authors', [])[:2])}[/]"
+                content = r.get("summary", "")[:200] + "..."
             else:
-                source = r.get('source', 'web').capitalize()
-                title_line = r['title']
-                content = r.get('snippet', '')[:200] + "..."
-            
+                title_line = r.get("title", "(no title)")
+                content = r.get("snippet", "")[:200] + "..."
+
             table.add_row(str(i), source, title_line, content)
-        
+
         self.console.print(table)
-        
-        # 4. Save/Download phase
-        has_arxiv = any(r.get('result_obj') for r in self.results)
-        has_web = any(r.get('source') in ['web', 'news', 'dictionary'] for r in self.results)
-        
+
+        # 4. Save / Download phase
+        has_arxiv = any(r.get("source") == "arxiv" for r in self.results)
+        has_web = any(r.get("source") in ["web", "news", "dictionary"] for r in self.results)
+
         actions = []
-        if has_arxiv: actions.append("Download PDFs")
-        if has_web: actions.append("Scrape full articles/definitions to TXT")
-        
-        action_str = " & ".join(actions)
-        confirm = Prompt.ask(f"\n[bold]{action_str} for these results?[/]", choices=["y", "n"], default="y")
-        
-        if confirm.lower() == 'y':
+        if has_arxiv:
+            actions.append("Download PDFs")
+        if has_web:
+            actions.append("Scrape full articles/definitions to TXT")
+
+        action_str = " & ".join(actions) if actions else "Save"
+        confirm = Prompt.ask(
+            f"\n[bold]{action_str} for these results?[/]", choices=["y", "n"], default="y"
+        )
+
+        if confirm.lower() == "y":
             with Progress(
                 SpinnerColumn(),
                 TextColumn("[progress.description]{task.description}"),
                 BarColumn(),
                 TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-                console=self.console
+                console=self.console,
             ) as progress:
                 label = "Downloading" if self.mode == "arxiv" else "Scraping"
                 overall_task = progress.add_task(f"[cyan]{label} data...", total=len(self.results))
-                
+
                 for r in self.results:
-                    if r.get('result_obj'): # ArXiv paper
+                    if r.get("source") == "arxiv":
                         path = self.pdf_downloader.download(r)
-                    else: # Web or Dictionary
+                    else:
                         path = self.web_scraper.scrape_to_file(r)
-                        
+
                     if path:
                         progress.print(f"✅ [green]Saved:[/] {os.path.basename(path)}")
                     else:
-                        progress.print(f"❌ [red]Failed:[/] {r['title'][:50]}...")
+                        progress.print(f"❌ [red]Failed:[/] {r.get('title', '?')[:50]}...")
                     progress.advance(overall_task)
-            
-            self.console.print(f"\n[bold green]Success![/] Data available in research and web_research directories.")
+
+            self.console.print(
+                "\n[bold green]Success![/] Data available in research and web_research directories."
+            )
+
+    # ------------------------------------------------------------------
+    # Interactive CLI loop
+    # ------------------------------------------------------------------
 
     def start(self):
         self.display_welcome()
         while True:
             try:
-                user_input = Prompt.ask(f"\n[bold cyan]research[/bold cyan] [dim]({self.mode})[/] [white]❯[/white]").strip()
-                
+                user_input = Prompt.ask(
+                    f"\n[bold cyan]research[/bold cyan] [dim]({self.mode})[/] [white]❯[/white]"
+                ).strip()
+
                 if not user_input:
                     continue
-                
+
                 if user_input.lower() in ["/exit", "/quit", "exit", "quit"]:
                     self.console.print("[bold yellow]Goodbye![/]")
                     break
-                
+
                 if user_input.startswith("/"):
                     parts = user_input.split(" ", 1)
                     cmd = parts[0].lower()
-                    
+
                     if cmd == "/help":
                         self.help()
                     elif cmd == "/mode":
@@ -209,12 +272,13 @@ class ResearchCLI:
                         self.console.print(f"[red]Unknown command: {cmd}. Type /help for assistance.[/]")
                 else:
                     self.run_research(user_input)
-                    
+
             except KeyboardInterrupt:
                 self.console.print("\n[bold yellow]Exiting...[/]")
                 break
             except Exception as e:
                 self.console.print(f"\n[bold red]Error:[/] {str(e)}")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Research Engine CLI")
@@ -228,6 +292,7 @@ def main():
         cli.run_research(args.topic)
     else:
         cli.start()
+
 
 if __name__ == "__main__":
     main()

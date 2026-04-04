@@ -1,98 +1,134 @@
 import time
 from ddgs import DDGS
 from ddgs.exceptions import RatelimitException
-from typing import List, Dict
+from typing import List, Dict, Callable, Any
+
 
 class WebSearcher:
     def __init__(self, max_results: int = 5):
         self.max_results = max_results
+        # Backoff delays (seconds) for successive rate-limit hits
+        self._backoff_delays = [2, 4, 8]
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _search_with_retry(self, ddgs: DDGS, method: Callable, **kwargs) -> List[Dict]:
+        """
+        Call a DDGS search method with exponential backoff on RatelimitException.
+        Returns the raw result list, or [] if all retries are exhausted.
+        """
+        for attempt, delay in enumerate([0] + self._backoff_delays, start=1):
+            if delay:
+                time.sleep(delay)
+            try:
+                return list(method(**kwargs))
+            except RatelimitException:
+                if attempt > len(self._backoff_delays):
+                    # Last attempt failed — give up on this query
+                    return []
+                # Otherwise loop and retry after the next delay
+                continue
+            except Exception as e:
+                print(f"[WebSearcher] Unexpected error: {e}")
+                return []
+        return []
+
+    # ------------------------------------------------------------------
+    # Public search methods
+    # ------------------------------------------------------------------
 
     def search_text(self, queries: List[str]) -> List[Dict]:
         """
-        Perform a general web search.
+        Perform a general web search for each query.
         """
-        results = []
-        seen_links = set()
-        
+        results: List[Dict] = []
+        seen_links: set = set()
+
         with DDGS() as ddgs:
-            for query in queries:
-                try:
-                    ddgs_gen = ddgs.text(query, max_results=self.max_results)
-                    for r in ddgs_gen:
-                        if r['href'] not in seen_links:
-                            results.append({
-                                "title": r['title'],
-                                "link": r['href'],
-                                "snippet": r['body'],
-                                "source": "web"
-                            })
-                            seen_links.add(r['href'])
-                    # Add delay between different queries
+            for i, query in enumerate(queries):
+                # Polite inter-query delay (skip before very first query)
+                if i > 0:
                     time.sleep(1.0)
-                except RatelimitException:
-                    print(f"Rate limited by DuckDuckGo for query: {query}")
-                    continue
-                except Exception as e:
-                    print(f"Error searching Web: {e}")
-                    continue
+
+                raw = self._search_with_retry(
+                    ddgs,
+                    ddgs.text,
+                    keywords=query,
+                    max_results=self.max_results,
+                )
+                for r in raw:
+                    if r["href"] not in seen_links:
+                        results.append({
+                            "title": r["title"],
+                            "link": r["href"],
+                            "snippet": r["body"],
+                            "source": "web",
+                        })
+                        seen_links.add(r["href"])
+
         return results
 
     def search_news(self, queries: List[str]) -> List[Dict]:
         """
-        Perform a news search (useful for company updates).
+        Perform a news search (useful for company updates and recent events).
         """
-        results = []
-        seen_links = set()
-        
+        results: List[Dict] = []
+        seen_links: set = set()
+
         with DDGS() as ddgs:
-            for query in queries:
-                try:
-                    ddgs_gen = ddgs.news(query, max_results=self.max_results)
-                    for r in ddgs_gen:
-                        if r['url'] not in seen_links:
-                            results.append({
-                                "title": r['title'],
-                                "link": r['url'],
-                                "snippet": r['body'],
-                                "date": r.get('date'),
-                                "source": r.get('source', 'news')
-                            })
-                            seen_links.add(r['url'])
-                    # Add delay between different queries
+            for i, query in enumerate(queries):
+                if i > 0:
                     time.sleep(1.0)
-                except RatelimitException:
-                    print(f"Rate limit hit for query: {query}")
-                    continue
-                except Exception as e:
-                    print(f"Error searching News: {e}")
-                    continue
+
+                raw = self._search_with_retry(
+                    ddgs,
+                    ddgs.news,
+                    keywords=query,
+                    max_results=self.max_results,
+                )
+                for r in raw:
+                    if r["url"] not in seen_links:
+                        results.append({
+                            "title": r["title"],
+                            "link": r["url"],
+                            "snippet": r["body"],
+                            "date": r.get("date"),
+                            "source": r.get("source", "news"),
+                        })
+                        seen_links.add(r["url"])
+
         return results
 
     def search_definitions(self, terms: List[str]) -> List[Dict]:
         """
-        Perform a targeted search for definitions of specific terms.
+        Perform a targeted search for definitions of specific technical terms.
+        Only the top result per term is kept.
         """
-        results = []
-        seen_links = set()
-        
+        results: List[Dict] = []
+        seen_links: set = set()
+
         with DDGS() as ddgs:
-            for term in terms:
-                query = f"{term} definition meaning"
-                try:
-                    # For definitions, we mostly want the top result
-                    ddgs_gen = ddgs.text(query, max_results=2)
-                    for r in ddgs_gen:
-                        if r['href'] not in seen_links:
-                            results.append({
-                                "title": f"Definition: {term}",
-                                "link": r['href'],
-                                "snippet": r['body'],
-                                "source": "dictionary"
-                            })
-                            seen_links.add(r['href'])
-                    # Add delay
+            for i, term in enumerate(terms):
+                if i > 0:
                     time.sleep(1.0)
-                except Exception as e:
-                    print(f"Error searching definitions for {term}: {e}")
-                    continue
+
+                query = f"{term} definition meaning"
+                raw = self._search_with_retry(
+                    ddgs,
+                    ddgs.text,
+                    keywords=query,
+                    max_results=2,
+                )
+                for r in raw:
+                    if r["href"] not in seen_links:
+                        results.append({
+                            "title": f"Definition: {term}",
+                            "link": r["href"],
+                            "snippet": r["body"],
+                            "source": "dictionary",
+                        })
+                        seen_links.add(r["href"])
+
         return results
