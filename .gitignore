@@ -15,9 +15,20 @@ ENV/
 .Python
 debug.log
 *.log
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+backend/venv/
+backend/.env
 
 # RAG Storage & Generated Data
 /storage/
+*.db
+*.sqlite
+/backend/artifacts/
+/backend/data/processed/
 
 # System
 .DS_Store

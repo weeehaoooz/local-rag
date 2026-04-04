@@ -523,3 +523,29 @@ class SmartDocumentLoader:
         for doc in docs:
             doc.metadata.setdefault("source_type", fmt if fmt != "unknown" else "txt")
         return docs
+
+def discover_files(data_dir=None):
+    """Scan directory and group files by category."""
+    from collections import defaultdict
+    from retrieval.guardrails import _derive_category
+    from config import DATA_DIR
+
+    if data_dir is None:
+        data_dir = DATA_DIR
+    
+    logger.debug(f"Scanning {data_dir} for files...")
+    all_files = []
+    for root, _, files in os.walk(data_dir):
+        for file in files:
+            if file.endswith((".txt", ".pdf", ".docx", ".md")):
+                all_files.append(os.path.join(root, file))
+    
+    if not all_files:
+        return {}, []
+
+    files_by_category = defaultdict(list)
+    for f in all_files:
+        cat = _derive_category(f, data_dir)
+        files_by_category[cat].append(f)
+    
+    return files_by_category, all_files
