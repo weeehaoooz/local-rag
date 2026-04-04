@@ -3,7 +3,7 @@
 PLANNING_PROMPT = """
 You are an advanced research orchestration agent. Your goal is to help a user research the following topic: "{topic}".
 Current search mode: {mode}
-Mode Instructions: {mode_instruction}
+Mode Instructions: {mode_instruction}{context_instruction}
 
 Please provide your response in the following JSON format:
 {{

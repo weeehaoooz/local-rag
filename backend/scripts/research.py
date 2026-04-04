@@ -1,7 +1,13 @@
 import os
 import sys
 import argparse
+import time
 from typing import List, Dict
+
+try:
+    import readline
+except ImportError:
+    pass
 
 # Add backend directory to sys.path for internal imports
 BACKEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -49,8 +55,30 @@ class ResearchCLI:
         self.engine = None  # Lazily loaded HybridEngine
         self.current_topic = None
         self.results: List[Dict] = []
+        self.retained_results: List[Dict] = []
         self.plan: Dict = {}
         self.synthesis: str = ""
+
+    def _ask(self, text: str, choices: List[str] = None, default: str = None) -> str:
+        """Readline-safe prompt wrapper to avoid backspace deleting the prompt text."""
+        while True:
+            opts = f" [dim]\\[{'/'.join(choices)}][/]" if choices else ""
+            def_str = f" ({default})" if default else ""
+            self.console.print(f"{text}{opts}{def_str}")
+            
+            try:
+                ans = input("❯ ").strip()
+            except EOFError:
+                ans = ""
+                
+            if not ans and default is not None:
+                ans = default
+                
+            if choices and ans not in choices:
+                self.console.print(f"[red]Please enter one of: {', '.join(choices)}[/]")
+                continue
+                
+            return ans
 
     # ------------------------------------------------------------------
     # UI helpers
@@ -74,6 +102,8 @@ class ResearchCLI:
         table.add_row("/analyze <idx>", "Get a deep-dive analysis of a specific result.")
         table.add_row("/refine <feedback>", "Refine the current research plan.")
         table.add_row("/synthesize", "Regenerate the research synthesis report.")
+        table.add_row("/select", "Toggle retaining current sources in memory.")
+        table.add_row("/save", "Save current research results for KG indexing.")
         table.add_row("/limit <n>", "Set max results per query (default: 5).")
         table.add_row("/clear", "Clear results and history.")
         table.add_row("/exit", "Exit the Research Engine.")
@@ -82,6 +112,18 @@ class ResearchCLI:
     # ------------------------------------------------------------------
     # Core research logic
     # ------------------------------------------------------------------
+
+    def get_combined_results(self) -> List[Dict]:
+        combined = list(self.retained_results)
+        retained_links = {r.get("link") for r in combined if r.get("link")}
+        retained_ids = {r.get("id") for r in combined if r.get("id")}
+        for r in self.results:
+            if r.get("link") and r.get("link") in retained_links:
+                continue
+            if r.get("id") and r.get("id") in retained_ids:
+                continue
+            combined.append(r)
+        return combined
 
     @staticmethod
     def _deduplicate(results: List[Dict]) -> List[Dict]:
@@ -101,7 +143,7 @@ class ResearchCLI:
 
         # 1. Planning phase
         with self.console.status(f"[bold yellow]Planning research for: {topic}...[/]", spinner="dots"):
-            self.plan = self.planner.generate_plan(topic, mode=self.mode)
+            self.plan = self.planner.generate_plan(topic, mode=self.mode, context=self.retained_results)
 
         self.interactive_planning()
 
@@ -113,7 +155,7 @@ class ResearchCLI:
                 title="Proposed Research Plan", border_style="green"
             ))
 
-            choice = Prompt.ask(
+            choice = self._ask(
                 "\n[bold]Execute plan, [yellow]refine[/] it, or [red]cancel[/]?[/]",
                 choices=["e", "r", "c"], default="e"
             )
@@ -122,7 +164,7 @@ class ResearchCLI:
                 self.execute_search()
                 break
             elif choice == "r":
-                feedback = Prompt.ask("[yellow]What should I change in the plan?[/]")
+                feedback = self._ask("\n[yellow]What should I change in the plan?[/]")
                 with self.console.status("[bold yellow]Refining plan...[/]", spinner="dots"):
                     self.plan = self.planner.refine_plan(self.current_topic, self.plan, feedback)
             else:
@@ -222,49 +264,162 @@ class ResearchCLI:
 
     def display_results(self):
         # Display Synthesis
-        self.console.print(Panel(
-            self.synthesis, title=f"Research Report: {self.current_topic}", border_style="blue"
-        ))
+        if self.synthesis:
+            self.console.print(Panel(
+                self.synthesis, title=f"Research Report: {self.current_topic}", border_style="blue"
+            ))
 
         # Display Results Table
-        table = Table(title="Retrieved Sources", show_lines=True)
+        table = Table(title="Retrieved Sources (Memory + Current)", show_lines=True)
         table.add_column("Idx", justify="center", style="dim")
         table.add_column("Source", style="bold cyan")
         table.add_column("Title / Snippet", style="white")
 
-        for i, r in enumerate(self.results, 1):
+        combined = self.get_combined_results()
+        retained_links = {r.get("link") for r in self.retained_results if r.get("link")}
+        retained_ids = {r.get("id") for r in self.retained_results if r.get("id")}
+
+        for i, r in enumerate(combined, 1):
             source = r.get("source", "web").capitalize()
+            is_retained = (r.get("link") in retained_links if r.get("link") else False) or \
+                          (r.get("id") in retained_ids if r.get("id") else False)
+            source_label = f"{source}\n[bold green][Retained][/]" if is_retained else source
             title = r.get("title", "(no title)")
             content = r.get("snippet", r.get("summary", ""))[:150] + "..."
-            table.add_row(str(i), source, f"[bold]{title}[/]\n[dim]{content}[/]")
+            table.add_row(str(i), source_label, f"[bold]{title}[/]\n[dim]{content}[/]")
 
         self.console.print(table)
         self.console.print(
-            "\n[dim]Use [bold]/ask[/] to query these results, [bold]/analyze <idx>[/] for deep-dives, or [bold]/exit[/] to finish.[/]"
+            "\n[dim]Use [bold]/ask[/] to query, [bold]/analyze <idx/selected>[/] for deep-dives, [bold]/select[/] to retain memory, [bold]/save[/] for KG, or [bold]/exit[/].[/]"
         )
 
     def chat_with_results(self, question: str):
-        if not self.results:
+        combined = self.get_combined_results()
+        if not combined:
             self.console.print("[red]No research context available. Start a topic first.[/]")
             return
         
         with self.console.status("[bold cyan]Consulting findings...[/]", spinner="bouncingBall"):
-            answer = self.planner.chat_with_results(self.current_topic, question, self.results)
+            answer = self.planner.chat_with_results(self.current_topic, question, combined)
         
         self.console.print(Panel(answer, title="Research Assistant", border_style="cyan"))
 
     def analyze_item(self, idx_str: str):
+        combined = self.get_combined_results()
+        
+        if idx_str.lower() in ["selected", "all"]:
+            if not self.retained_results:
+                self.console.print("[red]No retained sources to analyze.[/]")
+                return
+            for r in self.retained_results:
+                with self.console.status(f"[bold magenta]Analyzing {r.get('title')}...[/]", spinner="pong"):
+                    analysis = self.planner.analyze_result(self.current_topic, r)
+                self.console.print(Panel(analysis, title=f"Deep Analysis: {r.get('title')}", border_style="magenta"))
+            return
+
         try:
-            idx = int(idx_str) - 1
-            if 0 <= idx < len(self.results):
-                result = self.results[idx]
-                with self.console.status(f"[bold magenta]Analyzing result {idx+1}...[/]", spinner="pong"):
-                    analysis = self.planner.analyze_result(self.current_topic, result)
-                self.console.print(Panel(analysis, title=f"Deep Analysis: {result['title']}", border_style="magenta"))
-            else:
-                self.console.print(f"[red]Invalid index: {idx_str}[/]")
+            indices = [int(x.strip()) - 1 for x in idx_str.split(",") if x.strip().isdigit()]
+            for idx in indices:
+                if 0 <= idx < len(combined):
+                    result = combined[idx]
+                    with self.console.status(f"[bold magenta]Analyzing {result['title']}...[/]", spinner="pong"):
+                        analysis = self.planner.analyze_result(self.current_topic, result)
+                    self.console.print(Panel(analysis, title=f"Deep Analysis: {result['title']}", border_style="magenta"))
+                else:
+                    self.console.print(f"[red]Invalid index: {idx+1}[/]")
         except ValueError:
-            self.console.print("[red]Please provide a numeric index.[/]")
+            self.console.print("[red]Please provide numeric indices (e.g. '1,3') or 'selected'.[/]")
+
+    def interactive_select(self):
+        try:
+            import questionary
+        except ImportError:
+            self.console.print("[red]The 'questionary' library is not installed. Run 'pip install questionary'.[/]")
+            return
+
+        combined = self.get_combined_results()
+        if not combined:
+            self.console.print("[yellow]No results available to select.[/]")
+            return
+
+        retained_links = {r.get("link") for r in self.retained_results if r.get("link")}
+        retained_ids = {r.get("id") for r in self.retained_results if r.get("id")}
+        
+        choices = []
+        for i, r in enumerate(combined, 1):
+            is_retained = (r.get("link") in retained_links if r.get("link") else False) or \
+                          (r.get("id") in retained_ids if r.get("id") else False)
+            source_label = r.get("source", "unknown").capitalize()
+            title = r.get("title", "(no title)")[:80] + "..." if len(r.get("title", "")) > 80 else r.get("title", "(no title)")
+            
+            label = f"{i}. {title} [{source_label}]"
+            choices.append(
+                questionary.Choice(
+                    title=label,
+                    value=r,
+                    checked=is_retained
+                )
+            )
+
+        self.console.print("\n[bold cyan]Interactive Memory Selection[/]")
+        self.console.print("[dim](Use ↑/↓ ARROW keys to move, SPACE to toggle, ENTER to confirm)[/]")
+        
+        selected_results = questionary.checkbox(
+            "",
+            choices=choices,
+        ).ask()
+
+        if selected_results is not None:
+            self.retained_results = selected_results
+            self.console.print(f"[bold green]Updated memory to {len(self.retained_results)} retained sources.[/]")
+
+    def save_results(self, tags: List[str]):
+        combined = self.get_combined_results()
+        if not combined:
+            self.console.print("[red]No results to save.[/]")
+            return
+
+        safe_topic = "".join([c if c.isalnum() else "_" for c in (self.current_topic or "untitled")])
+        timestamp = int(time.time())
+        export_dir = os.path.join(DATA_DIR, "saved_research", f"{safe_topic}_{timestamp}")
+        
+        os.makedirs(export_dir, exist_ok=True)
+        
+        grouped = {}
+        for r in combined:
+            src = r.get("source", "unknown").lower()
+            if src not in grouped:
+                grouped[src] = []
+            grouped[src].append(r)
+        
+        for src, items in grouped.items():
+            file_path = os.path.join(export_dir, f"{src}.md")
+            
+            md_lines = [
+                f"# Research Topic: {self.current_topic or 'Untitled'}",
+                f"**Tags:** {', '.join(tags) if tags else 'None'}",
+                f"**Source:** {src}\n",
+            ]
+            
+            if self.synthesis:
+                md_lines.extend(["## Synthesis", self.synthesis, "\n"])
+                
+            md_lines.append("## Retrieved Items\n")
+            
+            for idx, item in enumerate(items, 1):
+                title = item.get("title", "(no title)")
+                link = item.get("link", "")
+                snippet = item.get("snippet", "")
+                
+                md_lines.append(f"### {idx}. {title}")
+                if link:
+                    md_lines.append(f"**Link:** {link}")
+                md_lines.append(f"\n{snippet}\n")
+                
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(md_lines))
+                
+        self.console.print(f"[bold green]Saved {len(combined)} results across {len(grouped)} sources to:[/]\n[cyan]{export_dir}[/]")
 
     # ------------------------------------------------------------------
     # Interactive CLI loop
@@ -274,9 +429,17 @@ class ResearchCLI:
         self.display_welcome()
         while True:
             try:
-                user_input = Prompt.ask(
-                    f"\n[bold cyan]research[/bold cyan] [dim]({self.mode})[/] [white]❯[/white]"
-                ).strip()
+                self.console.print()
+                cyan = "\001\033[1;36m\002"
+                dim = "\001\033[2m\002"
+                white = "\001\033[1;37m\002"
+                reset = "\001\033[0m\002"
+                prompt_str = f"{cyan}research{reset} {dim}({self.mode}){reset} {white}❯{reset} "
+                
+                try:
+                    user_input = input(prompt_str).strip()
+                except EOFError:
+                    break
 
                 if not user_input:
                     continue
@@ -313,10 +476,12 @@ class ResearchCLI:
                         if len(parts) > 1:
                             self.analyze_item(parts[1])
                         else:
-                            self.console.print("[red]Usage: /analyze <index>[/]")
+                            self.console.print("[red]Usage: /analyze <indices> or /analyze selected[/]")
+                    elif cmd == "/select":
+                        self.interactive_select()
                     elif cmd == "/refine":
                         if self.current_topic and self.plan:
-                            feedback = parts[1] if len(parts) > 1 else Prompt.ask("[yellow]Refinement feedback?[/]")
+                            feedback = parts[1] if len(parts) > 1 else self._ask("\n[yellow]Refinement feedback?[/]")
                             with self.console.status("[bold yellow]Refining...[/]"):
                                 self.plan = self.planner.refine_plan(self.current_topic, self.plan, feedback)
                             self.interactive_planning()
@@ -329,8 +494,16 @@ class ResearchCLI:
                             self.display_results()
                         else:
                             self.console.print("[red]No results to synthesize.[/]")
+                    elif cmd == "/save":
+                        if len(parts) > 1:
+                            tags = [t.strip() for t in parts[1].split(",") if t.strip()]
+                        else:
+                            tags_input = self._ask("\n[yellow]Enter tags for these sources (comma-separated, or press Enter to skip)[/]")
+                            tags = [t.strip() for t in tags_input.split(",") if t.strip()]
+                        self.save_results(tags)
                     elif cmd == "/clear":
                         self.results = []
+                        self.retained_results = []
                         self.current_topic = None
                         self.console.clear()
                         self.display_welcome()

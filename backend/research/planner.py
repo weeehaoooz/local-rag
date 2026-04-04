@@ -18,7 +18,7 @@ class ResearchPlanner:
         setup_models()
         self.llm = Settings.llm
 
-    def generate_plan(self, topic: str, mode: str = "arxiv") -> Dict:
+    def generate_plan(self, topic: str, mode: str = "arxiv", context: List[Dict] = None) -> Dict:
         """
         Generate a research objective and a list of search queries based on the mode.
         """
@@ -36,10 +36,26 @@ class ResearchPlanner:
                 "local": "Search within the user's local knowledge base or uploaded documents.",
             }.get(mode, "General search queries.")
 
+        context_instruction = ""
+        if context:
+            ctx_items = []
+            for item in context[:10]: # limit to avoid blowing up context window
+                title = item.get("title", "No title")
+                snippet = item.get("snippet", item.get("summary", ""))[:150]
+                ctx_items.append(f"- {title}: {snippet}")
+            ctx_str = "\n".join(ctx_items)
+            context_instruction = (
+                f"\n\nPrior Retained Context:\n{ctx_str}\n\n"
+                "IMPORTANT: The user has explicitly selected the above prior context. "
+                "You must base your new queries and objective on extending, deepening, or finding synergies "
+                "with this prior context if it is relevant to the new topic."
+            )
+
         prompt = PLANNING_PROMPT.format(
             topic=topic,
             mode=mode.upper(),
-            mode_instruction=mode_instruction
+            mode_instruction=mode_instruction,
+            context_instruction=context_instruction
         )
 
         response = self.llm.complete(prompt)
