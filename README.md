@@ -1,23 +1,40 @@
-# Local Hybrid RAG with Knowledge Graphs (LightRAG)
+# Agentic Local RAG & Research Engine (LightRAG)
 
-This project implements a local RAG (Retrieval-Augmented Generation) system that leverages both Vector embeddings and Property Knowledge Graphs for more accurate and context-aware information retrieval. It follows the **LightRAG** approach, combining granular entity-based retrieval with global community summarization.
+This project implements an **Agentic Local RAG** (Retrieval-Augmented Generation) system and **Deep Research Engine** that leverages Vector embeddings, Property Knowledge Graphs, and Web/Academic search for more accurate and context-aware information retrieval. It follows the **LightRAG** approach, combining granular entity-based retrieval with global community summarization, enhanced by an agentic orchestration layer.
 
 It is built using **LlamaIndex** and **Ollama**, with **Neo4j** as the graph database backend.
 
 ## 🚀 Features
 
+### Core RAG Engine
 - **Dual-Level Retrieval**: Combines low-level relational context (N-hop neighbors) with high-level community summaries.
 - **Hierarchical Chunking**: Uses a Small-to-Big strategy (Semantic Splitter for parents, Sentence Splitter for children) for precise extraction.
 - **Actor-Critic Extraction**: Fact-checks Knowledge Graph triplets against the source text to ensure accuracy.
 - **Local-First**: All LLM processing (**Gemma 4**) and embeddings (**Nomic Embed**) run locally via Ollama.
 - **Incremental Updates**: Uses hash-based tracking to update the graph without full re-indexing.
 
+### Agentic Orchestration
+- **Query Transformation**: Implements HyDE (Hypothetical Document Embeddings) and Multi-Query decomposition for complex reasoning.
+- **Self-Reflection (CRAG)**: Grading retrieval results and answer groundedness to detect and correct hallucinations.
+- **Intelligent Routing**: Dynamic planning and tool selection between Vector, Graph, and Web/Academic sources.
+- **Query Decomposition**: Splits multi-topic questions into independent sub-queries for parallel retrieval.
+
+### Deep Research & Web Integration
+- **Hybrid Search**: Integrates DuckDuckGo (Web) and ArXiv (Academic) research tools.
+- **Deep Research Mode**: Automated terminology discovery and trafilatura-based article scraping for real-time document ingestion.
+- **Conversational Research**: Interactive multi-turn research workflows for in-depth topic exploration.
+
+### Data & Evaluation
+- **Structured Data Support**: Native handling for CSV, JSON, and SQL datasets with table-aware indexing.
+- **Evaluation Framework**: Built-in RAG validation metrics (Precision, Recall, Faithfulness, Relevance) to measure system performance iterations.
+
 ## 🛠️ Tech Stack
 
 - **Framework**: [LlamaIndex](https://www.llamaindex.ai/)
-- **LLM**: [Ollama](https://ollama.com/) (Gemma 4)
+- **LLM**: [Ollama](https://ollama.com/) (Gemma 4 / Llama 3)
 - **Embeddings**: Ollama (Nomic Embed Text)
 - **Graph Database**: [Neo4j](https://neo4j.com/)
+- **Utilities**: [Trafilatura](https://trafilatura.readthedocs.io/) (Scraping), DuckDuckGo-Search (Web), ArXiv (Academic Research)
 - **Environment**: Python 3.x
 
 ## 📋 Prerequisites
@@ -49,26 +66,85 @@ NEO4J_PASSWORD=your_password
 - **[backend/ingestion/](backend/ingestion/)**: Layout-aware loaders and coreference preprocessors.
 - **[backend/indexing/](backend/indexing/)**: Graph extraction, community detection, and vector indexing.
 - **[backend/retrieval/](backend/retrieval/)**: Hybrid retrieval engine with local/global routing logic.
+- **[backend/retrieval/services/](backend/retrieval/services/)**: Agentic services (Orchestrator, Decomposer, Transformer, Evaluator).
+- **[backend/research/](backend/research/)**: Deep Research engine with search tools and scraper.
 - **[backend/scripts/](backend/scripts/)**: Management utilities for graph cleanup and status checks.
 
 ## 🚀 Getting Started
 
-### 1. Install Dependencies
+Follow these steps to get your local KG-RAG system up and running.
+
+### 1. Project Setup
+Clone the repository and create a Python virtual environment:
 ```bash
+# Create and activate virtual environment
+python3 -m venv backend/venv
+source backend/venv/bin/activate  # On Windows: backend\Scripts\activate
+
+# Install backend dependencies
 pip install -r backend/requirements.txt
 ```
 
-### 2. Index Your Data
-Place your documents in the `./backend/data` folder and start the background ingestion service or run a manual scan:
+### 2. Verify Your Environment
+Before indexing, ensure your local services (Ollama and Neo4j) are reachable:
 ```bash
-# Example manual scan if integrated into a script
-python backend/scripts/manage_indexes.py stats
+python backend/scripts/check_connections.py
+```
+*This will check for required models (Gemma 4, Nomic Embed) and Neo4j connectivity.*
+
+### 3. Index Your Data
+1. Place your `.pdf`, `.docx`, or `.txt` files in `backend/data/`.
+2. Run the initial indexing scan:
+   ```bash
+   # This will populate the Vector and Property Graph indexes
+   python backend/scripts/manage_indexes.py stats
+   ```
+   *Note: On first run, it will automatically trigger the ingestion of new files.*
+3. **Critical**: Run community clustering to enable "Global" retrieval:
+   ```bash
+   python backend/scripts/manage_indexes.py cluster --summarize
+   ```
+
+### 4. Launch the Application
+
+#### Option A: Web Interface (Recommended)
+The full experience includes a FastAPI backend and an Angular frontend.
+
+**Start the Backend API:**
+```bash
+# Runs on http://localhost:8000
+python backend/api.py
 ```
 
-### 3. Start Chatting
+**Start the Frontend UI:**
+```bash
+cd frontend
+npm install
+npm start  # Runs on http://localhost:4200
+```
+
+#### Option B: Interactive CLI
+For a pure terminal-based chat experience:
 ```bash
 python backend/main.py
 ```
+
+#### Option C: Research Engine
+Launch the research module to search Web or Academic (ArXiv) sources:
+```bash
+# This will enter an interactive session for Deep Research
+python backend/scripts/research.py
+```
+
+## 🔍 How it Works
+
+1. **Ingestion & Hierarchical Chunking**: Documents (PDF, DOCX, TXT, CSV, JSON) are loaded via layout-aware loaders and split into "Small-to-Big" chunks for balanced context and precision.
+2. **Actor-Critic KG Extraction**: Entities and relationships are extracted using an LLM loop that fact-checks every triplet against the source text to prevent hallucinations.
+3. **Agentic Pipeline**: Every query is processed through a multi-stage workflow:
+   - **Transformer**: Re-writes queries and generates hypothetical documents (HyDE) to align with vector space.
+   - **Decomposer**: Breaks complex questions into simpler sub-queries.
+   - **Orchestrator**: Dynamically selects the best tools (Vector, Graph, or Web Search) for each sub-query.
+4. **Self-Reflection (CRAG)**: Retrieval results are graded on relevance; if the context is insufficient, the system automatically triggers a web search to fill gaps. The final answer is then grounded against the retrieved documents.
 
 ## 🤝 Contributing
 

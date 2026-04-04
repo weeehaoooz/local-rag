@@ -111,6 +111,13 @@ class ChatResponse(BaseModel):
     graph_context: list[GraphNode] = []
     query_type: str = "LOCAL"
     suggested_prompts: list[str] = []
+    # Self-reflection diagnostics
+    reflection_loops: int = 0
+    retrieval_grade: str = "pass"
+    answer_grade: str = "grounded"
+    # Orchestrator diagnostics
+    tools_used: list[str] = []
+    orchestrator_rationale: str = ""
 
 
 class TitleRequest(BaseModel):
@@ -158,6 +165,11 @@ def chat(req: ChatRequest):
         graph_context=[GraphNode(text=g[0], source=g[1]) for g in result.get("graph_context", [])],
         query_type=result.get("query_type", "LOCAL"),
         suggested_prompts=result.get("suggested_prompts", []),
+        reflection_loops=result.get("reflection_loops", 0),
+        retrieval_grade=result.get("retrieval_grade", "pass"),
+        answer_grade=result.get("answer_grade", "grounded"),
+        tools_used=result.get("tools_used", []),
+        orchestrator_rationale=result.get("orchestrator_rationale", ""),
     )
 
 
