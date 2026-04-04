@@ -27,6 +27,15 @@ export interface ChatMessage {
   stats?: ChatStats;
   graphContext?: GraphNode[];
   suggestedPrompts?: string[];
+  sub_queries?: string[];
+  reflection_loops?: number;
+  retrieval_grade?: string;
+  answer_grade?: string;
+  tools_used?: string[];
+  orchestrator_rationale?: string;
+  isStreaming?: boolean;
+  processingState?: string;
+  liveTokenCount?: number;
 }
 
 export interface Conversation {
@@ -63,6 +72,12 @@ export interface ChatResponse {
   graph_context: GraphNode[];
   query_type: string;
   suggested_prompts?: string[];
+  sub_queries?: string[];
+  reflection_loops?: number;
+  retrieval_grade?: string;
+  answer_grade?: string;
+  tools_used?: string[];
+  orchestrator_rationale?: string;
 }
 
 export interface TitleRequest {

@@ -14,6 +14,7 @@ import os
 import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Literal
@@ -123,6 +124,7 @@ class ChatResponse(BaseModel):
     answer_grade: str = "grounded"
     tools_used: list[str] = []
     orchestrator_rationale: str = ""
+    sub_queries: list[str] = []
 
 
 class TitleRequest(BaseModel):
@@ -178,6 +180,24 @@ async def chat(req: ChatRequest):
         answer_grade=result.get("answer_grade", "grounded"),
         tools_used=result.get("tools_used", []),
         orchestrator_rationale=result.get("orchestrator_rationale", ""),
+        sub_queries=result.get("sub_queries", []),
+    )
+
+
+@app.post("/api/chat/stream")
+async def chat_stream(req: ChatRequest):
+    if not req.message.strip():
+        raise HTTPException(status_code=400, detail="Message cannot be empty.")
+
+    engine = _get_engine()
+    return StreamingResponse(
+        engine.chat_stream_status_async(
+            req.message,
+            req.mode,
+            req.history,
+            req.system_prompt,
+        ),
+        media_type="text/event-stream"
     )
 
 

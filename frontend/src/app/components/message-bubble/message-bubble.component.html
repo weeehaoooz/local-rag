@@ -19,9 +19,21 @@
       <span class="message-time">{{ message().timestamp | date:'shortTime' }}</span>
     </div>
 
-    <div class="message-content">{{ message().content }}</div>
+    @if (message().isStreaming) {
+      <div class="processing-hud">
+        <div class="pulse-ring"></div>
+        <div class="processing-state">{{ message().processingState }}</div>
+        @if (message().liveTokenCount && message().liveTokenCount! > 0) {
+          <div class="live-tokens">
+            <span class="icon">⚡</span> {{ message().liveTokenCount }} tokens generated
+          </div>
+        }
+      </div>
+    } @else {
+      <div class="message-content">{{ message().content }}</div>
+    }
 
-    @if (message().sources.length > 0) {
+    @if (!message().isStreaming && message().sources.length > 0) {
       <div class="message-sources">
         <span class="sources-label">Sources:</span>
         <div class="sources-list">
@@ -32,7 +44,49 @@
       </div>
     }
 
-    @if (message().graphContext && message().graphContext!.length > 0) {
+    @if (!message().isStreaming && (message().sub_queries?.length || message().tools_used?.length || message().orchestrator_rationale)) {
+      <details class="agentic-preview">
+        <summary class="agentic-preview-summary">
+          <span class="icon">⚙️</span> Agent Orchestration
+        </summary>
+        <div class="agentic-preview-content">
+          @if (message().orchestrator_rationale) {
+            <div class="agentic-section">
+              <span class="section-label">Rationale:</span>
+              <div class="section-text">{{ message().orchestrator_rationale }}</div>
+            </div>
+          }
+          @if (message().tools_used?.length) {
+            <div class="agentic-section">
+              <span class="section-label">Tools Used:</span>
+              <div class="section-text">{{ message().tools_used!.join(', ') }}</div>
+            </div>
+          }
+          @if (message().sub_queries?.length) {
+            <div class="agentic-section">
+              <span class="section-label">Sub-Queries:</span>
+              <ul class="sub-queries-list">
+                @for (query of message().sub_queries; track query) {
+                  <li>{{ query }}</li>
+                }
+              </ul>
+            </div>
+          }
+          @if (message().reflection_loops) {
+            <div class="agentic-section">
+              <span class="section-label">Reflection:</span>
+              <div class="section-text">
+                Loops: {{ message().reflection_loops }} |
+                Retrieval grade: {{ message().retrieval_grade }} |
+                Answer grade: {{ message().answer_grade }}
+              </div>
+            </div>
+          }
+        </div>
+      </details>
+    }
+
+    @if (!message().isStreaming && message().graphContext && message().graphContext!.length > 0) {
       <details class="kg-preview">
         <summary class="kg-preview-summary">
           <span class="icon">🕸️</span> View Knowledge Graph Context
@@ -48,7 +102,7 @@
       </details>
     }
 
-    @if (message().stats; as stats) {
+    @if (!message().isStreaming && message().stats; as stats) {
       <div class="message-stats">
         <span class="stat-item" title="Tokens Per Second">
           <span class="stat-icon">⚡</span>
@@ -62,7 +116,7 @@
       </div>
     }
 
-    @if (message().suggestedPrompts && message().suggestedPrompts!.length > 0) {
+    @if (!message().isStreaming && message().suggestedPrompts && message().suggestedPrompts!.length > 0) {
       <div class="suggested-prompts-container">
         <span class="suggested-prompts-title">Suggested Follow-ups:</span>
         <div class="suggested-prompts-list">
