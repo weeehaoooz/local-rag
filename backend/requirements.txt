@@ -22,3 +22,9 @@ llama-index-retrievers-bm25   # Lexical keyword search for hybrid retrieval
 # --- Graph Cleaning & Community Detection ---
 numpy               # Vectorized cosine similarity for graph cleaning
 networkx            # Louvain/Leiden community detection for GraphRAG
+
+# --- Research Engine ---
+arxiv               # ArXiv API for paper discovery
+rich                # Premium CLI interface / REPL
+ddgs                # Free web and news searches
+trafilatura         # Clean text extraction from web pages

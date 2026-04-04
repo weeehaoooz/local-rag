@@ -23,7 +23,7 @@ INDEXING_STATE = os.path.join(STORAGE_DIR, "indexing_state.json")
 # Ensure base storage exists
 os.makedirs(STORAGE_DIR, exist_ok=True)
 
-def setup_indexing_env():
+def setup_models():
     """Setup models and global settings."""
     llm = Ollama(
         model="gemma4:latest",
@@ -43,11 +43,18 @@ def setup_indexing_env():
     Settings.llm = llm
     Settings.embed_model = embed_model
     Settings.num_workers = 1
+    return llm, embed_model
 
-    graph_store = Neo4jPropertyGraphStore(
+def get_graph_store():
+    """Connect to Neo4j and return the graph store."""
+    return Neo4jPropertyGraphStore(
         username=os.getenv("NEO4J_USERNAME", "neo4j"),
         password=os.getenv("NEO4J_PASSWORD", "password"),
         url=os.getenv("NEO4J_URI", "bolt://localhost:7687"),
         refresh_schema=False,
     )
-    return graph_store
+
+def setup_indexing_env():
+    """Legacy helper to setup both models and graph store."""
+    setup_models()
+    return get_graph_store()

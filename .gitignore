@@ -24,6 +24,7 @@ backend/venv/
 backend/.env
 
 # RAG Storage & Generated Data
+/backend/data/
 /storage/
 *.db
 *.sqlite
