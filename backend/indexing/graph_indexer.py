@@ -314,10 +314,14 @@ class GraphIndexer(BaseIndexer):
         except Exception as e:
             print(f"     Warning: Failed to create MENTIONS edges: {e}")
 
-    def _create_semantic_edges(self, new_nodes: List[TextNode], top_k: int = 3):
+    def _create_semantic_edges(self, new_nodes: Optional[List[TextNode]] = None, top_k: int = 3):
         """
         Calculates embeddings for the chunks and creates SIMILAR_TO edges
         to the most semantically similar existing chunks in the graph.
+        
+        If new_nodes is provided, only searches similarities for those specific nodes
+        against the entire graph. If new_nodes is None, re-evaluates similarities
+        for all nodes in the graph (Global Optimization).
         """
         if not isinstance(self.storage_context.property_graph_store, Neo4jPropertyGraphStore):
             return
@@ -398,8 +402,14 @@ class GraphIndexer(BaseIndexer):
             except Exception as e:
                 print(f"     Warning: Failed to save chunk embeddings: {e}")
 
-        # 3. Compute pairwise similarities only for new_nodes against all_chunks
-        new_ids = {n.id_ for n in new_nodes}
+        # 3. Compute pairwise similarities:
+        #    If new_nodes is provided, only check those. Otherwise, check all chunks.
+        if new_nodes is not None:
+            new_ids = {n.id_ for n in new_nodes}
+            print(f"     Processing {len(new_ids)} new nodes...")
+        else:
+            new_ids = {c["id"] for c in valid_chunks}
+            print(f"     Processing all {len(new_ids)} valid chunks...")
         
         # Filter all_chunks that have valid embeddings
         valid_chunks = [c for c in all_chunks if c["embedding"] is not None and len(c["embedding"]) > 1]
@@ -834,6 +844,36 @@ class GraphIndexer(BaseIndexer):
             summary_docs.append(Document(text=doc_text, metadata=metadata, id_=f"community_{cid}"))
             
         return summary_docs
+
+    def refine_graph(self):
+        """
+        Perform a full suite of Knowledge Graph structural refinements.
+        This updates labels, collapses properties, ensures MENTIONS links,
+        and regenerates semantic chunk-to-chunk SIMILAR_TO edges.
+        """
+        if not isinstance(self.storage_context.property_graph_store, Neo4jPropertyGraphStore):
+            print("Graph refinement only supported for Neo4jPropertyGraphStore.")
+            return
+
+        print("\n--- Refining Knowledge Graph Structure & Semantics ---")
+        
+        # 1. Promote HAS_PROPERTY to real Node properties
+        print("  -> Refining Business Object properties...")
+        self._process_properties_in_graph()
+        
+        # 2. Promote labels
+        print("  -> Promoting entity_type → Neo4j labels...")
+        self._apply_entity_labels(category=None) # Use category from props if any
+        
+        # 3. Explicit Mentions
+        print("  -> Refreshing MENTIONS relationships...")
+        self._link_chunks_to_entities()
+        
+        # 4. Semantic Edges (Global)
+        print("  -> Re-computing semantic edges (SIMILAR_TO) for all chunks...")
+        self._create_semantic_edges(new_nodes=None)
+        
+        print("✅ Graph refinement complete.")
 
 
 # ===========================================================================

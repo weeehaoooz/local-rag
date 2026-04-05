@@ -177,6 +177,44 @@ def show_stats(args):
             size = os.path.getsize(item_path)
             print(f"  {item: <20} : {size / 1024:.2f} KB")
 
+def optimize_indexes(args):
+    """Run all optimization services in sequence."""
+    print("\n" + "="*60)
+    print("   KNOWLEDGE GRAPH GLOBAL OPTIMIZATION")
+    print("="*60)
+    
+    setup_models()
+    
+    # 1. Semantic Cleanup (Merging nodes & relationship normalization)
+    if not args.skip_clean:
+        clean_indexes(args)
+    else:
+        print("\nℹ️ [Optimization] Skipping Semantic Cleanup.")
+        
+    # 2. Structural & Semantic Refinement (Labels, Props, Semantic Edges)
+    #    This part uses the indexer's new refine_graph() method.
+    if not args.skip_refine:
+        try:
+            graph_store = get_graph_store()
+            storage_context = StorageContext.from_defaults(property_graph_store=graph_store)
+            indexer = GraphIndexer(storage_context)
+            indexer.refine_graph()
+        except Exception as e:
+            print(f"❌ [Optimization] Error during graph refinement: {e}")
+    else:
+        print("\nℹ️ [Optimization] Skipping Structural Refinement.")
+        
+    # 3. Community Detection & Summarization (GraphRAG Clustering)
+    if not args.skip_cluster:
+        # We reuse the cluster_indexes logic, ensuring summarize is passed correctly
+        cluster_indexes(args)
+    else:
+        print("\nℹ️ [Optimization] Skipping Community Detection.")
+        
+    print("\n" + "="*60)
+    print("   OPTIMIZATION COMPLETE")
+    print("="*60 + "\n")
+
 def main():
     parser = argparse.ArgumentParser(description="Manage RAG indexes and knowledge graph.")
     subparsers = parser.add_subparsers(dest="command", help="Management command to run")
@@ -197,6 +235,17 @@ def main():
     # Stats command
     subparsers.add_parser("stats", help="Show current index statistics")
 
+    # Optimize command
+    opt_parser = subparsers.add_parser("optimize", help="Run full suite of KG optimization services (Clean + Cluster + Refine)")
+    opt_parser.add_argument("--threshold", type=float, default=0.9, help="Similarity threshold for merging nodes (Cleanup)")
+    opt_parser.add_argument("--rel-threshold", type=float, default=None, help="Similarity threshold for merging relationships")
+    opt_parser.add_argument("--resolution", type=float, default=1.0, help="Louvain resolution parameter (Clustering)")
+    opt_parser.add_argument("--summarize", action="store_true", default=True, help="Generate LLM summaries for communities (Default: True)")
+    opt_parser.add_argument("--no-summarize", dest="summarize", action="store_false", help="Skip LLM community summarization")
+    opt_parser.add_argument("--skip-clean", action="store_true", help="Skip semantic cleanup pass")
+    opt_parser.add_argument("--skip-cluster", action="store_true", help="Skip community detection pass")
+    opt_parser.add_argument("--skip-refine", action="store_true", help="Skip structural refinement pass (Labels/Edges)")
+
     args = parser.parse_args()
 
     if args.command == "clear":
@@ -209,6 +258,8 @@ def main():
         cluster_indexes(args)
     elif args.command == "stats":
         show_stats(args)
+    elif args.command == "optimize":
+        optimize_indexes(args)
     else:
         parser.print_help()
 
