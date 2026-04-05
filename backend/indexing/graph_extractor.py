@@ -3,6 +3,8 @@ from datetime import datetime, timezone
 import os
 import re
 import asyncio
+import concurrent.futures
+import threading
 import difflib
 import nest_asyncio
 import numpy as np
@@ -26,12 +28,98 @@ class RobustSchemaExtractor(SchemaLLMPathExtractor):
     Bypasses SchemaLLMPathExtractor.__call__ entirely to avoid the
     asyncio.run() -> sniffio context loss chain on Python 3.14.
     Calls llm.structured_predict() (sync) directly instead.
+
+    Performance improvements over the original:
+    - FIX 1: Temporal properties are extracted in a single batched LLM call
+             per chunk instead of one call per triplet.
+    - FIX 2: Chunks are processed concurrently via a ThreadPoolExecutor so
+             independent LLM calls overlap (wall-time / workers).
+    - FIX 3: Actor-Critic verification is skipped for chunks with <=3 triplets
+             where the overhead exceeds the benefit.
+    - FIX 4: EntityNode objects are cached by ID within each __call__ invocation
+             to avoid duplicate MERGE operations in Neo4j.
+
+    Verbose per-step progress logging is emitted for every chunk so you can
+    always tell whether the extractor is running or stuck.
     """
 
-    def _verify_triplets(self, node_text: str, triplets: List[Any]) -> List[Any]:
+    # ------------------------------------------------------------------
+    # FIX 1 - Batched temporal extraction
+    # ------------------------------------------------------------------
+
+    def _extract_temporal_properties_batch(
+        self,
+        node_text: str,
+        triplets_info: List[Tuple[str, str, str]],
+    ) -> List[Dict]:
+        """
+        Extract temporal metadata for *all* triplets in a single LLM call.
+
+        Args:
+            node_text:     The source chunk text.
+            triplets_info: List of (rel_type, subj_name, obj_name) tuples.
+
+        Returns:
+            Parallel list of dicts, each with optional 'valid_from' / 'valid_to'.
+        """
+        empty = [{} for _ in triplets_info]
+        if not triplets_info:
+            return empty
+
+        temporal_keywords = [
+            "since", "from", "until", "to", "between", "during",
+            "started", "ended", "joined", "left", "resigned",
+            "appointed", "established", "founded", "dissolved",
+        ]
+        if not any(kw in node_text.lower() for kw in temporal_keywords):
+            return empty
+
+        items = "\n".join(
+            f"{i + 1}. ({s}) --[{r}]--> ({o})"
+            for i, (r, s, o) in enumerate(triplets_info)
+        )
+        prompt = (
+            "You are a temporal metadata extractor.\n\n"
+            f"Source text:\n{node_text[:1000]}\n\n"
+            f"Relationships:\n{items}\n\n"
+            "For EACH relationship return a JSON array where every element is an object "
+            'with optional keys "valid_from" and "valid_to" (string values). '
+            'Use {} when no temporal info exists for that relationship.\n'
+            "Return ONLY the JSON array with no explanation or markdown fences.\n"
+            'Example for 2 relationships: [{}, {"valid_from": "2020", "valid_to": "present"}]'
+        )
+        try:
+            import json as _json
+            response = self.llm.complete(prompt).text.strip()
+            start = response.find("[")
+            end = response.rfind("]") + 1
+            if start != -1 and end > start:
+                parsed = _json.loads(response[start:end])
+                if isinstance(parsed, list) and len(parsed) == len(triplets_info):
+                    result = []
+                    for entry in parsed:
+                        props = {}
+                        if isinstance(entry, dict):
+                            if entry.get("valid_from"):
+                                props["valid_from"] = str(entry["valid_from"])
+                            if entry.get("valid_to"):
+                                props["valid_to"] = str(entry["valid_to"])
+                        result.append(props)
+                    return result
+        except Exception as e:
+            print(f"     [DEBUG] Batched temporal extraction failed: {e}. Using empty props.", flush=True)
+        return empty
+
+    # ------------------------------------------------------------------
+    # Actor-Critic verification
+    # ------------------------------------------------------------------
+
+    def _verify_triplets(self, node_text: str, triplets: List[Any], chunk_label: str = "") -> List[Any]:
         """
         Actor-Critic verification: asks the LLM to verify if the extracted
         triplets are explicitly supported by the source text.
+
+        FIX 3: Only called when len(triplets) > 3.
         """
         if not triplets:
             return []
@@ -39,12 +127,11 @@ class RobustSchemaExtractor(SchemaLLMPathExtractor):
         claims = []
         for i, t in enumerate(triplets):
             subj = (t.subject.name or "Unknown") if hasattr(t, "subject") else "Unknown"
-            obj = (t.object.name or "Unknown") if hasattr(t, "object") else "Unknown"
-            rel = (t.relation.type or "RELATED_TO") if hasattr(t, "relation") else "RELATED_TO"
-            claims.append(f"{i+1}. ({subj}) --[{rel}]--> ({obj})")
+            obj  = (t.object.name  or "Unknown") if hasattr(t, "object")  else "Unknown"
+            rel  = (t.relation.type or "RELATED_TO") if hasattr(t, "relation") else "RELATED_TO"
+            claims.append(f"{i + 1}. ({subj}) --[{rel}]--> ({obj})")
 
         claims_str = "\n".join(claims)
-        
         prompt = (
             "You are a Fact Checker. Verify if the following Knowledge Graph triplets "
             "are EXPLICITLY supported by the text provided below.\n\n"
@@ -68,173 +155,290 @@ class RobustSchemaExtractor(SchemaLLMPathExtractor):
                     val = parts[1].strip().upper()
                     if "YES" in val:
                         try:
-                            # Strip any non-digit chars from idx_str (like '1.')
                             clean_idx = "".join(c for c in idx_str if c.isdigit())
                             if clean_idx:
                                 valid_indices.append(int(clean_idx) - 1)
                         except ValueError:
                             pass
-            
+
             verified = [triplets[i] for i in valid_indices if 0 <= i < len(triplets)]
-            print(f"     [DEBUG] Actor-Critic verified {len(verified)}/{len(triplets)} triplets from chunk", flush=True)
+            print(
+                f"     [Extractor] {chunk_label} verification: {len(verified)}/{len(triplets)} triplets kept",
+                flush=True,
+            )
             return verified
         except Exception as e:
-            print(f"     [DEBUG] Verification failed: {e}. Falling back to original extractions.", flush=True)
+            print(
+                f"     [Extractor] {chunk_label} verification failed ({e}), keeping all raw triplets",
+                flush=True,
+            )
             return triplets
 
-    def _extract_temporal_properties(self, rel_type: str, node_text: str, subj_name: str, obj_name: str) -> dict:
-        """
-        Ask the LLM to detect temporal qualifiers for a specific relationship.
-        Returns a dict with optional 'valid_from' and 'valid_to' keys.
-        """
-        # Quick heuristic: only call LLM if temporal keywords are present
-        temporal_keywords = [
-            "since", "from", "until", "to", "between", "during",
-            "started", "ended", "joined", "left", "resigned",
-            "appointed", "established", "founded", "dissolved",
-        ]
-        text_lower = node_text.lower()
-        if not any(kw in text_lower for kw in temporal_keywords):
-            return {}
+    # ------------------------------------------------------------------
+    # FIX 2 - Single-node processing extracted for thread-pool use
+    # ------------------------------------------------------------------
 
-        prompt = (
-            "You are a temporal metadata extractor. Given the relationship below and its source text, "
-            "determine if there are any time qualifiers (start date, end date) for this relationship.\n\n"
-            f"Relationship: ({subj_name}) --[{rel_type}]--> ({obj_name})\n"
-            f"Source text: {node_text[:1000]}\n\n"
-            "Respond with ONLY a JSON object with these optional keys:\n"
-            '- "valid_from": start date/year as string (e.g. "2020", "2020-01", "2020-01-15")\n'
-            '- "valid_to": end date/year as string, or "present" if ongoing\n\n'
-            'If no temporal info is found, respond with: {}\n'
-            "Do NOT include any explanation."
+    def _process_single_node(
+        self,
+        node: Any,
+        i: int,
+        total: int,
+        now_iso: str,
+        entity_cache: Dict,
+        cache_lock: Any,
+        done_counter: Dict,
+    ) -> Any:
+        """
+        Process one chunk: extract, verify, and annotate triplets.
+        Safe to call from a ThreadPoolExecutor worker.
+
+        Args:
+            entity_cache:  Shared dict mapping entity_id -> EntityNode (FIX 4).
+            cache_lock:    threading.Lock protecting entity_cache writes.
+            done_counter:  {"n": int, "lock": threading.Lock} for progress tracking.
+        """
+        from llama_index.core.graph_stores.types import (
+            KG_RELATIONS_KEY,
+            KG_NODES_KEY,
+            Relation,
+            EntityNode,
         )
+
+        chunk_label = f"chunk {i + 1}/{total}"
+
+        def _tick_done(relations_count: int = 0, nodes_count: int = 0, failed: bool = False):
+            with done_counter["lock"]:
+                done_counter["n"] += 1
+                completed = done_counter["n"]
+            if failed:
+                print(
+                    f"     [Extractor] {chunk_label} FAILED  ({completed}/{total} complete)",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"     [Extractor] {chunk_label} DONE    ({completed}/{total} complete)"
+                    f" -- {relations_count} relations, {nodes_count} nodes",
+                    flush=True,
+                )
+
         try:
-            response = self.llm.complete(prompt).text.strip()
-            import json as _json
-            # Extract JSON from response
-            start = response.find("{")
-            end = response.rfind("}") + 1
-            if start != -1 and end > start:
-                parsed = _json.loads(response[start:end])
-                result = {}
-                if parsed.get("valid_from"):
-                    result["valid_from"] = str(parsed["valid_from"])
-                if parsed.get("valid_to"):
-                    result["valid_to"] = str(parsed["valid_to"])
-                return result
-        except Exception:
-            pass
-        return {}
+            node_name = node.metadata.get("file_name") or node.metadata.get("title", "Unknown")
+            print(f"     [Extractor] {chunk_label} STARTED  -- '{node_name}'", flush=True)
+
+            node_text = node.get_content(metadata_mode="llm")
+
+            # Extract source_section from first heading line
+            source_section = ""
+            for line in node_text.split("\n"):
+                stripped = line.strip()
+                if stripped and _SECTION_HEADING_RE.match(stripped):
+                    source_section = stripped.lstrip("# ").strip()
+                    break
+
+            # ---- Step 1: Extract raw triplets --------------------------------
+            print(f"     [Extractor] {chunk_label} step 1/3 -- extracting triplets (LLM)...", flush=True)
+            kg_schema = self.llm.structured_predict(
+                self.kg_schema_cls,
+                self.extract_prompt,
+                text=node_text,
+            )
+            raw_triplets = []
+            if kg_schema and hasattr(kg_schema, "triplets"):
+                raw_triplets = kg_schema.triplets or []
+            print(
+                f"     [Extractor] {chunk_label} step 1/3 done -- {len(raw_triplets)} raw triplets",
+                flush=True,
+            )
+
+            # ---- Step 2: Actor-Critic verification (FIX 3: skip if <=3) -----
+            if len(raw_triplets) > 3:
+                print(
+                    f"     [Extractor] {chunk_label} step 2/3 -- verifying {len(raw_triplets)} triplets (LLM)...",
+                    flush=True,
+                )
+                verified_triplets = self._verify_triplets(node_text, raw_triplets, chunk_label)
+            else:
+                print(
+                    f"     [Extractor] {chunk_label} step 2/3 -- skipping verification (<=3 triplets)",
+                    flush=True,
+                )
+                verified_triplets = raw_triplets
+
+            # ---- Step 3: Batched temporal extraction (FIX 1) -----------------
+            triplets_info = []
+            for t in verified_triplets:
+                r = str(getattr(t.relation, "type", "RELATED_TO") or "RELATED_TO").strip()
+                s = str(getattr(t.subject,  "name", "") or "").strip()
+                o = str(getattr(t.object,   "name", "") or "").strip()
+                triplets_info.append((r, s, o))
+
+            if triplets_info:
+                print(
+                    f"     [Extractor] {chunk_label} step 3/3 -- temporal props"
+                    f" for {len(triplets_info)} triplets (batched LLM)...",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"     [Extractor] {chunk_label} step 3/3 -- no triplets, skipping temporal extraction",
+                    flush=True,
+                )
+            temporal_props_list = self._extract_temporal_properties_batch(node_text, triplets_info)
+            if triplets_info:
+                print(f"     [Extractor] {chunk_label} step 3/3 done", flush=True)
+
+            # ---- Build KG objects --------------------------------------------
+            kg_nodes_list = []
+            kg_relations_list = []
+
+            for idx, triplet in enumerate(verified_triplets):
+                try:
+                    raw_subj = getattr(triplet.subject, "name", None)
+                    raw_obj  = getattr(triplet.object,  "name", None)
+                    raw_rel  = getattr(triplet.relation, "type", None)
+
+                    if raw_subj is None or raw_obj is None or raw_rel is None:
+                        continue
+
+                    subj_name = str(raw_subj).strip()
+                    obj_name  = str(raw_obj).strip()
+                    rel_type  = str(raw_rel).strip()
+
+                    if not subj_name or not obj_name or not rel_type:
+                        continue
+
+                    subj_id = subj_name.replace(" ", "_").lower()
+                    obj_id  = obj_name.replace(" ", "_").lower()
+
+                    subj_type = str(getattr(triplet.subject, "type", "Entity") or "Entity").strip()
+                    obj_type  = str(getattr(triplet.object,  "type", "Entity") or "Entity").strip()
+
+                    temporal_props = temporal_props_list[idx] if idx < len(temporal_props_list) else {}
+
+                    # FIX 4 - Reuse cached EntityNode objects (lock for thread safety)
+                    with cache_lock:
+                        if subj_id not in entity_cache:
+                            node_props = {
+                                "entity_type": subj_type,
+                                "title": subj_name,
+                                "indexed_at": now_iso,
+                            }
+                            if source_section:
+                                node_props["source_section"] = source_section
+                            entity_cache[subj_id] = EntityNode(
+                                name=subj_id,
+                                label=subj_type,
+                                properties=node_props,
+                            )
+                        subj = entity_cache[subj_id]
+
+                        if obj_id not in entity_cache:
+                            obj_props = {
+                                "entity_type": obj_type,
+                                "title": obj_name,
+                                "indexed_at": now_iso,
+                            }
+                            if source_section:
+                                obj_props["source_section"] = source_section
+                            entity_cache[obj_id] = EntityNode(
+                                name=obj_id,
+                                label=obj_type,
+                                properties=obj_props,
+                            )
+                        obj = entity_cache[obj_id]
+
+                    rel_properties = {"indexed_at": now_iso}
+                    rel_properties.update(temporal_props)
+
+                    rel = Relation(
+                        source_id=subj_id,
+                        target_id=obj_id,
+                        label=rel_type,
+                        properties=rel_properties,
+                    )
+                    kg_nodes_list.extend([subj, obj])
+                    kg_relations_list.append(rel)
+
+                except Exception as e:
+                    t_str = (
+                        f"({getattr(triplet.subject, 'name', '?')}) "
+                        f"--[{getattr(triplet.relation, 'type', '?')}]--> "
+                        f"({getattr(triplet.object, 'name', '?')})"
+                    )
+                    print(f"     [DEBUG] Skipping triplet [{t_str}]: {e}", flush=True)
+                    continue
+
+            node.metadata[KG_RELATIONS_KEY] = kg_relations_list
+            node.metadata[KG_NODES_KEY] = kg_nodes_list
+            _tick_done(len(kg_relations_list), len(kg_nodes_list))
+
+        except Exception as e:
+            from llama_index.core.graph_stores.types import KG_RELATIONS_KEY, KG_NODES_KEY
+            node.metadata[KG_RELATIONS_KEY] = []
+            node.metadata[KG_NODES_KEY] = []
+            _tick_done(failed=True)
+            print(f"     [DEBUG] {chunk_label} exception detail: {e}", flush=True)
+
+        return node
+
+    # ------------------------------------------------------------------
+    # FIX 2 - Parallel __call__ via ThreadPoolExecutor
+    # ------------------------------------------------------------------
 
     def __call__(self, nodes, show_progress=False, **kwargs):
-        from llama_index.core.graph_stores.types import KG_RELATIONS_KEY, KG_NODES_KEY, Relation, EntityNode
+        """
+        Process all nodes concurrently. Each node runs in its own thread so
+        blocking LLM calls overlap (wall-time / num_workers).
 
+        kwargs:
+            num_workers (int): Thread pool size. Defaults to min(8, len(nodes)).
+        """
         now_iso = datetime.now(timezone.utc).isoformat()
+        total = len(nodes)
 
-        result_nodes = []
-        for node in nodes:
-            try:
-                node_text = node.get_content(metadata_mode="llm")
+        # Shared state (all thread-safe)
+        entity_cache: Dict = {}
+        cache_lock = threading.Lock()
+        done_counter = {"n": 0, "lock": threading.Lock()}
 
-                # Extract source_section from the chunk's content (first heading line)
-                source_section = ""
-                for line in node_text.split("\n"):
-                    stripped = line.strip()
-                    if stripped and _SECTION_HEADING_RE.match(stripped):
-                        source_section = stripped.lstrip("# ").strip()
-                        break
+        num_workers = kwargs.get("num_workers", min(8, max(1, total)))
+        print(
+            f"     [Extractor] Starting {total} chunk(s) across {num_workers} worker thread(s)...",
+            flush=True,
+        )
 
-                kg_schema = self.llm.structured_predict(
-                    self.kg_schema_cls,
-                    self.extract_prompt,
-                    text=node_text,
+        if num_workers == 1 or total == 1:
+            # Fast path: skip thread overhead for tiny workloads
+            return [
+                self._process_single_node(
+                    node, i, total, now_iso, entity_cache, cache_lock, done_counter
                 )
-                
-                raw_triplets = []
-                if kg_schema and hasattr(kg_schema, "triplets"):
-                    raw_triplets = kg_schema.triplets or []
-                
-                # Actor-Critic Validation Step
-                verified_triplets = self._verify_triplets(node_text, raw_triplets)
-                
-                kg_nodes_list = []
-                kg_relations_list = []
-                for triplet in verified_triplets:
-                    try:
-                        subj_name = (triplet.subject.name or "").strip()
-                        obj_name = (triplet.object.name or "").strip()
-                        rel_type = (triplet.relation.type or "").strip()
+                for i, node in enumerate(nodes)
+            ]
 
-                        if not subj_name or not obj_name or not rel_type:
-                            continue
+        result_nodes: List[Any] = [None] * total
 
-                        subj_id = subj_name.replace(" ", "_").lower()
-                        obj_id  = obj_name.replace(" ", "_").lower()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+            future_to_idx = {
+                executor.submit(
+                    self._process_single_node,
+                    node, i, total, now_iso, entity_cache, cache_lock, done_counter,
+                ): i
+                for i, node in enumerate(nodes)
+            }
+            for future in concurrent.futures.as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                try:
+                    result_nodes[idx] = future.result()
+                except Exception as e:
+                    print(
+                        f"     [DEBUG] Worker for chunk {idx + 1} raised unhandled exception: {e}",
+                        flush=True,
+                    )
+                    result_nodes[idx] = nodes[idx]  # return node unmodified on failure
 
-                        subj_type = triplet.subject.type or "Entity"
-                        obj_type  = triplet.object.type or "Entity"
-
-                        # Temporal metadata: detect valid_from / valid_to
-                        temporal_props = self._extract_temporal_properties(
-                            rel_type, node_text, subj_name, obj_name
-                        )
-
-                        # Use the normalized ID as the EntityNode name so that
-                        # Neo4j's MERGE matches it with the Relation endpoints.
-                        # The original human-readable name is stored in "title".
-                        node_props = {
-                            "entity_type": subj_type,
-                            "title": subj_name,
-                            "indexed_at": now_iso,
-                        }
-                        if source_section:
-                            node_props["source_section"] = source_section
-
-                        subj = EntityNode(
-                            name=subj_id,
-                            label=subj_type,
-                            properties=node_props,
-                        )
-
-                        obj_props = {
-                            "entity_type": obj_type,
-                            "title": obj_name,
-                            "indexed_at": now_iso,
-                        }
-                        if source_section:
-                            obj_props["source_section"] = source_section
-
-                        obj = EntityNode(
-                            name=obj_id,
-                            label=obj_type,
-                            properties=obj_props,
-                        )
-
-                        rel_properties = {"indexed_at": now_iso}
-                        rel_properties.update(temporal_props)
-
-                        rel = Relation(
-                            source_id=subj_id,
-                            target_id=obj_id,
-                            label=rel_type,
-                            properties=rel_properties,
-                        )
-                        kg_nodes_list.extend([subj, obj])
-                        kg_relations_list.append(rel)
-                    except Exception as e:
-                        print(f"     [DEBUG] Skipping triplet in conversion: {e}", flush=True)
-                        continue
-                
-                node.metadata[KG_RELATIONS_KEY] = kg_relations_list
-                node.metadata[KG_NODES_KEY] = kg_nodes_list
-                print(f"     [DEBUG] Validated {len(kg_relations_list)} relations and {len(kg_nodes_list)} nodes", flush=True)
-            except Exception as e:
-                print(f"     [DEBUG] Extraction/Validation failed: {e}", flush=True)
-                node.metadata[KG_RELATIONS_KEY] = []
-                node.metadata[KG_NODES_KEY] = []
-
-            result_nodes.append(node)
-
+        print(f"     [Extractor] All {total} chunk(s) complete.", flush=True)
         return result_nodes
 
 
@@ -244,12 +448,12 @@ class RobustSchemaExtractor(SchemaLLMPathExtractor):
 
 # Regex that matches lines which look like section headings:
 #   - Markdown headings:          "# Title" / "## Sub-section"
-#   - ALL-CAPS lines (≥4 chars):  "INTRODUCTION", "METHODOLOGY"
+#   - ALL-CAPS lines (>=4 chars): "INTRODUCTION", "METHODOLOGY"
 #   - Numbered section headings:  "1.2 Background", "3. Results"
 _SECTION_HEADING_RE = re.compile(
     r"^(?:"
     r"#{1,4}\s+.+"           # Markdown headings
-    r"|[A-Z][A-Z\s]{3,}$"   # All-caps headings (≥4 chars)
+    r"|[A-Z][A-Z\s]{3,}$"   # All-caps headings (>=4 chars)
     r"|\d+(?:\.\d+)*\.?\s+[A-Z].+"  # Numbered sections
     r")",
     re.MULTILINE,
@@ -263,23 +467,18 @@ def _split_by_sections(text: str) -> List[Dict[str, Any]]:
     Split *text* at section-heading boundaries.
     Returns a list of dicts: {"text": str, "section": str, "page": int}
     """
-    # 1. Identify all page markers
     page_markers = list(_PAGE_MARKER_RE.finditer(text))
-    
-    # 2. Identify all section markers
     section_markers = list(_SECTION_HEADING_RE.finditer(text))
-    
-    # Combine and sort markers by position
+
     all_markers = []
     for m in page_markers:
         all_markers.append({"pos": m.start(), "end": m.end(), "type": "page", "val": int(m.group(1))})
     for m in section_markers:
-        # Extract title: remove markdown prefix or just strip
         title = m.group(0).lstrip("# ").strip()
         all_markers.append({"pos": m.start(), "end": m.end(), "type": "section", "val": title})
-    
+
     all_markers.sort(key=lambda x: x["pos"])
-    
+
     if not all_markers:
         return [{"text": text, "section": "Preamble", "page": 1}]
 
@@ -287,76 +486,70 @@ def _split_by_sections(text: str) -> List[Dict[str, Any]]:
     current_page = 1
     current_section = "Preamble"
     prev_end = 0
-    
+
     for marker in all_markers:
-        # Segment before this marker
         segment_text = text[prev_end : marker["pos"]].strip()
         if segment_text:
             results.append({
                 "text": segment_text,
                 "section": current_section,
-                "page": current_page
+                "page": current_page,
             })
-        
-        # Update state based on marker
         if marker["type"] == "page":
             current_page = marker["val"]
         else:
             current_section = marker["val"]
-            
         prev_end = marker["end"]
-        
-    # Final segment
+
     final_text = text[prev_end:].strip()
     if final_text:
         results.append({
             "text": final_text,
             "section": current_section,
-            "page": current_page
+            "page": current_page,
         })
-        
+
     return results
 
 
-def _agentic_find_split(text: str, llm, window: int = 2000) -> int:
+def _agentic_find_split(text: str, llm, target_size: int = 4000) -> int:
     """
     Ask the LLM to identify the most semantically coherent split point within
-    a *window*-character excerpt of *text*.
+    the provided *text*, aiming for a split near *target_size* characters.
 
-    The LLM returns a character offset (integer) relative to the start of the
-    window.  This is used as an "agentic" override of a fixed-size boundary.
-
-    Returns a character index into *text*.  Falls back to ``len(text) // 2``
-    if the LLM response cannot be parsed.
-
-    .. warning::
-        This makes one LLM call per invocation.  Only use when ``agentic_chunk=True``.
+    Returns a character index into *text*.
     """
-    excerpt = text[:window]
+    window_start = max(0, target_size - 1500)
+    window_end = min(len(text), target_size + 1500)
+    excerpt = text[window_start:window_end]
+
     prompt = (
         "You are a document chunking expert. Your job is to find the BEST point to split "
         "the following text so that each resulting chunk is self-contained and covers a single topic.\n\n"
-        f"TEXT (first {window} characters):\n"
+        f"TEXT EXCERPT (centered around character index {target_size}):\n"
         "---\n"
         f"{excerpt}\n"
         "---\n\n"
-        "Reply with ONLY a single integer: the character index (0-based, relative to the start of the text above) "
-        "where the split should occur. Pick a point AFTER a sentence ends and BEFORE a new topic begins. "
+        f"Reply with ONLY a single integer: the character index (relative to the start of the WHOLE text, "
+        f"NOT the excerpt) where the split should occur. This index must be between {window_start} and {window_end}. "
+        "Pick a point AFTER a sentence ends and BEFORE a new topic begins. "
         "Do not include any explanation."
     )
     try:
         response = llm.complete(prompt).text.strip()
-        # Extract first integer from response
         import re as _re
-        m = _re.search(r"\d+", response)
-        if m:
-            idx = int(m.group())
-            # Clamp to valid range
-            if 0 < idx < len(text):
+        numbers = _re.findall(r"\d+", response)
+        for n in numbers:
+            idx = int(n)
+            if window_start < idx < window_end:
                 return idx
     except Exception as exc:
         print(f"     [agentic_chunk] LLM split-point detection failed: {exc}", flush=True)
-    return len(text) // 2
+
+    newline_pos = text.find("\n", target_size - 200, target_size + 200)
+    if newline_pos != -1:
+        return newline_pos
+    return target_size
 
 
 def _small_to_big_parse(
@@ -368,46 +561,10 @@ def _small_to_big_parse(
     agentic_chunk: bool = False,
     llm: Optional[Any] = None,
 ) -> Tuple[List[TextNode], List[TextNode]]:
-    """
-    Hierarchical & Recursive Small-to-Big parsing strategy.
-
-    Steps
-    -----
-    1. **Section splitting** (recursive boundary detection)
-       Detect natural section boundaries (Markdown headings, ALL-CAPS headings,
-       numbered sections) and split there *first* — keeping all content for a
-       given topic inside the same parent chunk.
-
-    2. **Agentic split (opt-in)**
-       When ``agentic_chunk=True``, each oversized section is further refined
-       by asking the LLM to choose the semantically best split point within a
-       2 000-char window.  This is expensive (1 LLM call per split) but produces
-       the most coherent chunks for highly heterogeneous content.
-
-    3. **SentenceSplitter fallback**
-       Any section that still exceeds ``big_chunk_size`` tokens is split by the
-       ``SentenceSplitter`` (sentence-boundary aware, no LLM cost).
-
-    4. **Small (child) nodes**
-       Each big (parent) node is further split into ``small_chunk_size``-token
-       child nodes for precise triplet extraction.
-
-    Returns
-    -------
-    (small_nodes, big_nodes)
-    """
     from llama_index.core import Settings as _Settings
     _llm = llm or _Settings.llm
     _embed_model = _Settings.embed_model
 
-    # Use SemanticSplitter for "Big" (Parent) chunks to ensure topic coherence
-    big_splitter = SemanticSplitterNodeParser(
-        buffer_size=1,
-        breakpoint_percentile_threshold=95,
-        embed_model=_embed_model,
-    )
-    
-    # Use SentenceSplitter for "Small" (Child) chunks for precise triplet extraction
     small_splitter = SentenceSplitter(
         chunk_size=small_chunk_size,
         chunk_overlap=small_chunk_overlap,
@@ -416,10 +573,9 @@ def _small_to_big_parse(
     big_nodes: List[TextNode] = []
     small_nodes: List[TextNode] = []
 
+    max_chars = big_chunk_size * 4
+
     for doc in documents:
-        # ----------------------------------------------------------------
-        # 1. Recursive section & page splitting
-        # ----------------------------------------------------------------
         sections = _split_by_sections(doc.get_content())
         print(
             f"     [chunking] '{doc.metadata.get('file_name', '?')}': "
@@ -427,72 +583,80 @@ def _small_to_big_parse(
             flush=True,
         )
 
-        section_docs: List[Document] = []
+        topic_blocks: List[Dict[str, Any]] = []
+        current_block_text = ""
+        current_block_metadata = {}
+
         for sec in sections:
             sec_text = sec["text"]
-            sec_metadata = {
-                **doc.metadata,
-                "page_number": sec["page"],
-                "section_title": sec["section"]
-            }
-            
-            # Agentic refinement for long sections
-            if agentic_chunk and _llm and len(sec_text) > big_chunk_size * 4:
-                print(
-                    f"     [agentic_chunk] Running LLM split-point detection on a "
-                    f"{len(sec_text)}-char segment...",
-                    flush=True,
-                )
-                split_idx = _agentic_find_split(sec_text, _llm)
-                left, right = sec_text[:split_idx].strip(), sec_text[split_idx:].strip()
-                for part in [left, right]:
-                    if part:
-                        section_docs.append(
-                            Document(text=part, metadata=sec_metadata)
-                        )
-            else:
-                section_docs.append(
-                    Document(text=sec_text, metadata=sec_metadata)
-                )
+            if current_block_text and (len(current_block_text) + len(sec_text) > max_chars * 1.2):
+                topic_blocks.append({"text": current_block_text, "metadata": current_block_metadata})
+                current_block_text = ""
 
-        # ----------------------------------------------------------------
-        # 2. SentenceSplitter for oversized sections → big (parent) nodes
-        # ----------------------------------------------------------------
-        # Ensure metadata is preserved through splitting
-        parent_chunks = big_splitter.get_nodes_from_documents(section_docs)
-        for parent in parent_chunks:
-            big_nodes.append(parent)
+            if not current_block_text:
+                current_block_metadata = {
+                    **doc.metadata,
+                    "page_number": sec["page"],
+                    "section_title": sec["section"],
+                }
 
-            # ----------------------------------------------------------------
-            # 3. Small (child) nodes from each parent
-            # ----------------------------------------------------------------
+            current_block_text += "\n\n" + sec_text if current_block_text else sec_text
+
+        if current_block_text:
+            topic_blocks.append({"text": current_block_text, "metadata": current_block_metadata})
+
+        final_parent_docs: List[Document] = []
+
+        def _recursive_split(text: str, metadata: dict):
+            if len(text) <= max_chars * 1.1:
+                final_parent_docs.append(Document(text=text, metadata=metadata))
+                return
+
+            if agentic_chunk and _llm:
+                print(f"     [agentic_chunk] Splitting {len(text)}-char segment...", flush=True)
+                split_idx = _agentic_find_split(text, _llm, target_size=max_chars)
+                left, right = text[:split_idx].strip(), text[split_idx:].strip()
+                if left and right:
+                    _recursive_split(left, metadata)
+                    _recursive_split(right, metadata)
+                    return
+
+            splitter = SentenceSplitter(chunk_size=big_chunk_size, chunk_overlap=big_chunk_overlap)
+            parts = splitter.split_text(text)
+            for p in parts:
+                final_parent_docs.append(Document(text=p, metadata=metadata))
+
+        for block in topic_blocks:
+            _recursive_split(block["text"], block["metadata"])
+
+        for parent_doc in final_parent_docs:
+            parent_node = TextNode(text=parent_doc.text, metadata=parent_doc.metadata)
+            if not parent_node.node_id:
+                import uuid
+                parent_node.id_ = str(uuid.uuid4())
+            big_nodes.append(parent_node)
+
             child_chunks = small_splitter.get_nodes_from_documents(
-                [Document(text=parent.text, metadata=parent.metadata)]
+                [Document(text=parent_node.text, metadata=parent_node.metadata)]
             )
             for child in child_chunks:
                 if not child.node_id:
                     import uuid
                     child.id_ = str(uuid.uuid4())
-                
-                # Metadata already contains page_number and section_title from parent.metadata
-                
-                # Clear relationships with null node_id
-                for rel_type in (
-                    NodeRelationship.SOURCE,
-                    NodeRelationship.NEXT,
-                    NodeRelationship.PREVIOUS,
-                ):
+
+                for rel_type in (NodeRelationship.SOURCE, NodeRelationship.NEXT, NodeRelationship.PREVIOUS):
                     rel_info = child.relationships.get(rel_type)
                     if rel_info is not None and not rel_info.node_id:
                         child.relationships.pop(rel_type, None)
-                child.metadata["parent_node_id"] = parent.node_id
+
+                child.metadata["parent_node_id"] = parent_node.node_id
                 small_nodes.append(child)
 
     return small_nodes, big_nodes
 
 
 # ---------------------------------------------------------------------------
-# Schema helpers – build extractors from guardrail JSON
+# Schema helpers - build extractors from guardrail JSON
 # ---------------------------------------------------------------------------
 
 def _build_extractors_from_guardrails(
@@ -505,10 +669,10 @@ def _build_extractors_from_guardrails(
     Build a list of KG extractors for PropertyGraphIndex based on guardrails.
 
     Strategy:
-    1. **SchemaLLMPathExtractor** – constrained to the entity/relationship
-       types declared in the guardrails (schema-guided).
-    2. **SimpleLLMPathExtractor** – (Optional) fallback free-form extraction.
-    3. **ImplicitPathExtractor** – captures document-structural relations
+    1. RobustSchemaExtractor - constrained to the entity/relationship types
+       declared in the guardrails (schema-guided).
+    2. SimpleLLMPathExtractor - (Optional) fallback free-form extraction.
+    3. ImplicitPathExtractor - captures document-structural relations
        (NEXT, PREVIOUS, SOURCE) for free (no LLM calls).
     """
     if llm is None:
@@ -523,9 +687,7 @@ def _build_extractors_from_guardrails(
 
     extractors = []
 
-    # 1. Schema-guided extractor (primary)
     if guardrails:
-        # Collect entity types from business_objects or entity_types
         business_objects = guardrails.get("business_objects", [])
         entity_types_from_objects = [obj["name"] for obj in business_objects if "name" in obj]
         entity_types = entity_types_from_objects or guardrails.get("entity_types", ["Entity"])
@@ -548,8 +710,6 @@ def _build_extractors_from_guardrails(
             )
         )
 
-    # 2. Free-form fallback extractor (Optional/Conditional)
-    # If we have guardrails AND include_free_form=False, we skip this to save LLM calls.
     if not guardrails or include_free_form:
         extractors.append(
             SimpleLLMPathExtractor(
@@ -558,7 +718,6 @@ def _build_extractors_from_guardrails(
             )
         )
 
-    # 3. Implicit structural extractor (no LLM cost)
     extractors.append(ImplicitPathExtractor())
 
     return extractors
@@ -567,4 +726,3 @@ def _build_extractors_from_guardrails(
 # ===========================================================================
 # GraphIndexer
 # ===========================================================================
-

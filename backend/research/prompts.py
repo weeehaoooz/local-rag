@@ -95,3 +95,14 @@ Snippets:
 Return ONLY a JSON list of strings.
 Example: ["RAG", "Vector Database", "Cosine Similarity"]
 """
+
+EXPANSION_TOPICS_PROMPT = """
+Analyze the following research synthesis for the topic "{topic}". 
+Identify 5-8 specific, high-value sub-topics or branches that would significantly expand the depth of this research.
+
+Research Synthesis:
+{synthesis}
+
+Return ONLY a JSON object with a "sub_topics" key containing a list of strings.
+Example: {{ "sub_topics": ["Quantum Error Correction", "Superconducting Qubits", "Quantum Algorithms"] }}
+"""

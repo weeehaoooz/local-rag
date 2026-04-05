@@ -11,7 +11,7 @@ PROJECT_ROOT = os.path.dirname(BACKEND_DIR)
 # ── Model Configuration ───────────────────────────────────────
 # Default models for the Ollama backend
 DEFAULT_LLM = "gemma4:latest"
-DEFAULT_EMBED = "nomic-embed-text"
+DEFAULT_EMBED = "bge-m3:latest"
 DEFAULT_VISION = "gemma4:latest"  # Multimodal model for images
 
 # Centralized storage directory at project root
@@ -48,7 +48,7 @@ def setup_models():
 
     Settings.llm = llm
     Settings.embed_model = embed_model
-    Settings.num_workers = 1
+    Settings.num_workers = max(1, (os.cpu_count() or 4) - 1)
     return llm, embed_model
 
 def get_graph_store():

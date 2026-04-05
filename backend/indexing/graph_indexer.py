@@ -5,6 +5,7 @@ import re
 import asyncio
 import difflib
 import nest_asyncio
+nest_asyncio.apply()
 import numpy as np
 from typing import List, Any, Optional, Dict, Tuple
 
@@ -53,10 +54,10 @@ class GraphIndexer(BaseIndexer):
     # ------------------------------------------------------------------
 
     async def aindex_documents(self, documents: List[Document], **kwargs) -> Any:
-        """Async variant — delegates to the sync path."""
-        return self.index_documents(documents, **kwargs)
+        """Async variant — awaits the async path."""
+        return await self.index_documents(documents, **kwargs)
 
-    def index_documents(
+    async def index_documents(
         self,
         documents: List[Document],
         max_triplets_per_chunk: int = 15,
@@ -163,7 +164,7 @@ class GraphIndexer(BaseIndexer):
             llm=llm,
             embed_model=Settings.embed_model,
             embed_kg_nodes=True,
-            use_async=False,
+            use_async=True,
             show_progress=False,
         )
 
@@ -193,53 +194,77 @@ class GraphIndexer(BaseIndexer):
                 return _original_upsert_relations(valid)
         self.index.property_graph_store.upsert_relations = _safe_upsert_relations
 
-        # 5. Insertion passes — synchronous to avoid sniffio issues on Python 3.14
-        # Hotfix for sniffio on Python 3.14: manually set the async library context
-        try:
-            import sniffio
-            sniffio.current_async_library_cvar.set("asyncio")
-        except (ImportError, AttributeError):
-            pass
+        # 5. Insertion passes — fully async to avoid deadlocking the event loop.
+        # use_async=True on PropertyGraphIndex means insert_nodes internally schedules
+        # coroutines; calling it synchronously inside an async context starves the loop.
+        # ainsert_nodes properly yields control so Ollama HTTP calls can complete.
 
         def _sanitize_node(node):
-            """Ensure a node has a valid id and clean relation metadata."""
+            """Ensure a node has a valid id and clean relation/node metadata."""
             import uuid as _uuid
-            from llama_index.core.graph_stores.types import KG_RELATIONS_KEY, KG_NODES_KEY
+            from llama_index.core.graph_stores.types import KG_RELATIONS_KEY, KG_NODES_KEY, EntityNode, Relation
+
             if not node.node_id:
                 node.id_ = str(_uuid.uuid4())
+
+            # 1. Clean Relations
             raw_rels = node.metadata.get(KG_RELATIONS_KEY, [])
             clean_rels = []
-            for r in raw_rels:
-                src = getattr(r, "source_id", None)
-                tgt = getattr(r, "target_id", None)
-                nid = getattr(r, "id", None)
-                if src is not None and tgt is not None:
-                    clean_rels.append(r)
-                elif src is None and tgt is None and nid is not None:
-                    clean_rels.append(r)
+            if isinstance(raw_rels, list):
+                for r in raw_rels:
+                    if isinstance(r, Relation):
+                        src = getattr(r, "source_id", None)
+                        tgt = getattr(r, "target_id", None)
+                        if src and tgt and isinstance(src, str) and isinstance(tgt, str):
+                            clean_rels.append(r)
             node.metadata[KG_RELATIONS_KEY] = clean_rels
+
+            # 2. Clean Nodes (EntityNode)
+            raw_kg_nodes = node.metadata.get(KG_NODES_KEY, [])
+            clean_kg_nodes = []
+            if isinstance(raw_kg_nodes, list):
+                for n in raw_kg_nodes:
+                    if isinstance(n, EntityNode):
+                        name = getattr(n, "name", None)
+                        if name and isinstance(name, str):
+                            clean_kg_nodes.append(n)
+            node.metadata[KG_NODES_KEY] = clean_kg_nodes
+
             return node
 
-        def _insert_pass(pass_num):
+        async def _insert_pass(pass_num):
             total_failed = 0
-            for node in small_nodes:
-                node = _sanitize_node(node)
+            batch_size = max(1, (os.cpu_count() or 4) - 1)
+
+            for i in range(0, len(small_nodes), batch_size):
+                batch = small_nodes[i:i + batch_size]
+                safe_nodes = [_sanitize_node(n) for n in batch]
+                print(f"     [Pass {pass_num}] Processing batch of {len(safe_nodes)} chunks (offset {i})...", flush=True)
                 try:
-                    self.index.insert_nodes([node])
+                    await self.index.ainsert_nodes(safe_nodes)
                 except Exception as exc:
                     err_str = str(exc)
-                    if "ConstraintValidationFailed" in err_str:
-                        pass
+                    if "ConstraintValidationFailed" in err_str or "SemanticError" in err_str:
+                        # Constraint errors often happen when parallel batches try to MERGE the same new entity.
+                        # We fallback to sequentially inserting the nodes in this batch.
+                        for node in safe_nodes:
+                            try:
+                                await self.index.ainsert_nodes([node])
+                            except Exception as sub_exc:
+                                if "ConstraintValidationFailed" not in str(sub_exc):
+                                    total_failed += 1
+                                    print(f"     [Pass {pass_num}] Sequential insert failed: {sub_exc}", flush=True)
                     else:
-                        total_failed += 1
-                        print(f"     [Pass {pass_num}] Insert failed: {exc}", flush=True)
+                        total_failed += len(safe_nodes)
+                        print(f"     [Pass {pass_num}] Batch Insert failed: {exc}", flush=True)
+
             if total_failed:
                 print(f"     ({total_failed} chunk(s) failed during pass {pass_num})")
 
         for i in range(num_passes):
             print(f"  -> PropertyGraph Extraction Pass {i + 1}/{num_passes} ({len(small_nodes)} nodes)...")
             try:
-                _insert_pass(i + 1)
+                await _insert_pass(i + 1)
             except Exception as e:
                 err_str = str(e)
                 if "ConstraintValidationFailed" in err_str:
@@ -346,7 +371,12 @@ class GraphIndexer(BaseIndexer):
                     chunks_to_update.append({"id": chunk["id"], "embedding": emb})
                 except Exception as e:
                     print(f"     Warning: Failed to embed chunk {chunk['id']}: {e}")
-                    chunk["embedding"] = [0.0] * 768  # Dummy to prevent crash
+                    # Dynamically determine dimension from model if possible, fallback to 768
+                    try:
+                        dim = len(Settings.embed_model.get_query_embedding("test"))
+                    except:
+                        dim = 768
+                    chunk["embedding"] = [0.0] * dim  # Dynamic dummy to prevent crash
         
         # Optional: Save embeddings back to Neo4j to save time on future runs
         if chunks_to_update:
@@ -809,4 +839,3 @@ class GraphIndexer(BaseIndexer):
 # ===========================================================================
 # GraphCleaner (unchanged)
 # ===========================================================================
-

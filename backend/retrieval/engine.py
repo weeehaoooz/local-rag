@@ -6,6 +6,7 @@ import os
 import asyncio
 import logging
 import time
+import numpy as np
 from dotenv import load_dotenv
 
 from llama_index.core import (
@@ -101,6 +102,38 @@ class HybridEngine:
             vector_ctx = StorageContext.from_defaults(persist_dir=VECTOR_DIR)
             self.vector_index = load_index_from_storage(vector_ctx)
             print("  ✓ Vector index loaded")
+            
+            # --- Dimension Check ---
+            try:
+                # Check current model dimension
+                current_dim = len(self.embed_model.get_query_embedding("test"))
+                
+                # Try to find a stored embedding to check its dimension
+                # We can peek into the vector store
+                vector_store = self.vector_index.vector_store
+                stored_dim = None
+                
+                # Different vector stores have different ways of exposing this
+                # For SimpleVectorStore (standard for local), it's in data.embedding_dict
+                if hasattr(vector_store, "_data") and hasattr(vector_store._data, "embedding_dict"):
+                    emb_dict = vector_store._data.embedding_dict
+                    if emb_dict:
+                        stored_dim = len(next(iter(emb_dict.values())))
+
+                if stored_dim and stored_dim != current_dim:
+                    print("\n" + "!"*60)
+                    print("CRITICAL: EMBEDDING DIMENSION MISMATCH DETECTED")
+                    print(f"Stored Index: {stored_dim} dimensions")
+                    print(f"Current Model: {current_dim} dimensions ({self.embed_model.model_name})")
+                    print("!"*60)
+                    print("\nTo fix this error, you must either:")
+                    print(f"1. Switch your DEFAULT_EMBED in config.py to a model with {stored_dim} dims.")
+                    print("2. Delete your 'storage/' directory and re-run your indexing.")
+                    print("!"*60 + "\n")
+            except Exception as dim_err:
+                # Fail open for dimension check to avoid blocking startup
+                print(f"  ? Could not verify index dimensions: {dim_err}")
+                
         except Exception as e:
             print(f"  ✗ Vector index not available: {e}")
             self.vector_index = None

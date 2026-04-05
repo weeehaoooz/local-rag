@@ -133,6 +133,41 @@ class GuardrailManager:
                 return existing
         return self.generate_document_summary(file_path, documents)
 
+    async def agenerate_document_summary(self, file_path: str, documents: List[Document]) -> str:
+        combined_text = "\n\n".join(
+            doc.get_content()[:2000] for doc in documents
+        )[:6000]
+
+        prompt = (
+            "You are a document analyst. Produce a concise but thorough semantic summary "
+            "of the document below. The summary will be used to guide knowledge graph "
+            "extraction, so focus on:\n"
+            "- The main subject(s) and domain of the document\n"
+            "- Key entities mentioned (people, organisations, products, concepts)\n"
+            "- Core relationships and facts described\n"
+            "- The document's overall purpose\n\n"
+            "Keep the summary under 300 words. Do not include any preamble.\n\n"
+            f"--- DOCUMENT ---\n{combined_text}"
+        )
+        response = await Settings.llm.acomplete(prompt)
+        summary = response.text.strip()
+
+        key = self._summary_key(file_path)
+        path = os.path.join(self.summaries_dir, f"{key}.json")
+        with open(path, "w") as f:
+            json.dump({"file_path": file_path, "summary": summary}, f, indent=2)
+        self._summary_cache[key] = summary
+        return summary
+
+    async def aensure_document_summary(
+        self, file_path: str, documents: List[Document], force: bool = False
+    ) -> str:
+        if not force:
+            existing = self.get_document_summary(file_path)
+            if existing:
+                return existing
+        return await self.agenerate_document_summary(file_path, documents)
+
     # ------------------------------------------------------------------
     # Public Guardrail API
     # ------------------------------------------------------------------

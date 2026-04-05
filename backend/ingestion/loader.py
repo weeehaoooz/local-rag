@@ -621,9 +621,7 @@ class SmartDocumentLoader:
         return docs
 
 def discover_files(data_dir=None):
-    """Scan directory and group files by category."""
-    from collections import defaultdict
-    from retrieval.guardrails import _derive_category
+    """Scan directory and yield all document files."""
     from config import DATA_DIR
 
     if data_dir is None:
@@ -636,12 +634,4 @@ def discover_files(data_dir=None):
             if file.endswith((".txt", ".pdf", ".docx", ".md")):
                 all_files.append(os.path.join(root, file))
     
-    if not all_files:
-        return {}, []
-
-    files_by_category = defaultdict(list)
-    for f in all_files:
-        cat = _derive_category(f, data_dir)
-        files_by_category[cat].append(f)
-    
-    return files_by_category, all_files
+    return all_files

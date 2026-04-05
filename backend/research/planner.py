@@ -9,7 +9,8 @@ from .prompts import (
     SYNTHESIS_PROMPT, 
     CONVERSATIONAL_QA_PROMPT, 
     ANALYSIS_PROMPT, 
-    TERMINOLOGY_PROMPT
+    TERMINOLOGY_PROMPT,
+    EXPANSION_TOPICS_PROMPT
 )
 
 class ResearchPlanner:
@@ -163,6 +164,19 @@ class ResearchPlanner:
             response = self.llm.complete(prompt)
             terms = self._parse_json(str(response))
             return [t for t in terms if isinstance(t, str)]
+        except Exception:
+            return []
+
+    def identify_expansion_topics(self, topic: str, synthesis: str) -> List[str]:
+        """
+        Analyze synthesis to find sub-topics for expansion.
+        """
+        prompt = EXPANSION_TOPICS_PROMPT.format(topic=topic, synthesis=synthesis or "No synthesis available.")
+        try:
+            response = self.llm.complete(prompt)
+            data = self._parse_json(str(response))
+            topics = data.get("sub_topics", [])
+            return [t for t in topics if isinstance(t, str)]
         except Exception:
             return []
 

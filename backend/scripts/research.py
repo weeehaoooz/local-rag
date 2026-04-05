@@ -58,6 +58,8 @@ class ResearchCLI:
         self.retained_results: List[Dict] = []
         self.plan: Dict = {}
         self.synthesis: str = ""
+        self.depth = 1  # Track tree depth
+        self.safe_root_topic: str = ""
 
     def _ask(self, text: str, choices: List[str] = None, default: str = None) -> str:
         """Readline-safe prompt wrapper to avoid backspace deleting the prompt text."""
@@ -97,6 +99,7 @@ class ResearchCLI:
         table.add_column("Command", style="bold green")
         table.add_column("Description")
         table.add_row("/topic <topic>", "Start research on a specific topic.")
+        table.add_row("/tree <topic> [depth]", "Recursive tree research (default depth=1).")
         table.add_row("/mode <mode>", "Switch between [yellow]deep, arxiv, web, wiki, news, local[/].")
         table.add_row("/ask <query>", "Ask a question about the current research findings.")
         table.add_row("/analyze <idx>", "Get a deep-dive analysis of a specific result.")
@@ -136,7 +139,8 @@ class ResearchCLI:
                 unique.append(r)
         return unique
 
-    def run_research(self, topic: str):
+
+    def run_research(self, topic: str, silent_plan: bool = False):
         self.current_topic = topic
         self.results = []
         self.synthesis = ""
@@ -145,7 +149,85 @@ class ResearchCLI:
         with self.console.status(f"[bold yellow]Planning research for: {topic}...[/]", spinner="dots"):
             self.plan = self.planner.generate_plan(topic, mode=self.mode, context=self.retained_results)
 
-        self.interactive_planning()
+        if silent_plan:
+            self.execute_search()
+        else:
+            self.interactive_planning()
+
+    def run_tree_research(self, topic: str, max_depth: int = 1, current_depth: int = 0):
+        """
+        Recursive research tree implementation.
+        """
+        indent = "  " * current_depth
+        self.console.print(f"\n{indent}[bold cyan]🌲 Researching Branch (Depth {current_depth}): {topic}[/]")
+        
+        # 1. Standard research run
+        # We skip interactive planning for sub-branches to keep it moving, 
+        # but the first root topic can be interactive if we call it from start()
+        self.run_research(topic, silent_plan=(current_depth > 0))
+        
+        if not self.synthesis:
+            self.console.print(f"{indent}[red]Failed to synthesize results for {topic}.[/]")
+            return
+
+        # 2. Save this specific topic's report
+        self.save_tree_report(topic, current_depth)
+
+        # 3. Recursive expansion
+        if current_depth < max_depth:
+            with self.console.status(f"{indent}[bold magenta]Identifying expansion topics...[/]"):
+                sub_topics = self.planner.identify_expansion_topics(topic, self.synthesis)
+            
+            if not sub_topics:
+                self.console.print(f"{indent}[yellow]No further expansion topics identified for {topic}.[/]")
+                return
+
+            # Interactive selection
+            try:
+                import questionary
+                selected = questionary.checkbox(
+                    f"Select sub-topics to expand from '{topic}':",
+                    choices=[questionary.Choice(t, checked=False) for t in sub_topics]
+                ).ask()
+            except ImportError:
+                self.console.print(f"{indent}[yellow]Questionary not found. Expanding into all topics: {', '.join(sub_topics)}[/]")
+                selected = sub_topics
+
+            if selected:
+                for sub in selected:
+                    # Clear results for next run but keep context? 
+                    # For now, let's keep it isolated but maybe pass some context?
+                    # The user wants "research_topic.md", so isolation is better.
+                    self.run_tree_research(sub, max_depth, current_depth + 1)
+
+    def save_tree_report(self, topic: str, depth: int):
+        safe_topic = "".join([c if c.isalnum() else "_" for c in topic])
+        export_dir = os.path.join(DATA_DIR, "research_trees", self.safe_root_topic if hasattr(self, "safe_root_topic") else safe_topic)
+        os.makedirs(export_dir, exist_ok=True)
+        
+        file_path = os.path.join(export_dir, f"{'sub_' * depth}{safe_topic}.md")
+        
+        md_lines = [
+            f"# Research Report: {topic}",
+            f"**Depth Level:** {depth}",
+            f"**Generated At:** {time.strftime('%Y-%m-%d %H:%M:%S')}\n",
+            "## Synthesis",
+            self.synthesis,
+            "\n## Sources Considered",
+        ]
+        
+        for idx, r in enumerate(self.results[:10], 1):
+            title = r.get("title", "(no title)")
+            link = r.get("link", "")
+            snippet = r.get("snippet", "")
+            md_lines.append(f"### {idx}. {title}")
+            if link: md_lines.append(f"**Link:** {link}")
+            md_lines.append(f"\n{snippet}\n")
+
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(md_lines))
+        
+        self.console.print(f"[bold green]Report saved:[/] [cyan]{file_path}[/]")
 
     def interactive_planning(self):
         while True:
@@ -384,42 +466,41 @@ class ResearchCLI:
         export_dir = os.path.join(DATA_DIR, "saved_research", f"{safe_topic}_{timestamp}")
         
         os.makedirs(export_dir, exist_ok=True)
+        file_path = os.path.join(export_dir, "research_report.md")
+        
+        md_lines = [
+            f"# Research Topic: {self.current_topic or 'Untitled'}",
+            f"**Tags:** {', '.join(tags) if tags else 'None'}\n",
+        ]
+        
+        if self.synthesis:
+            md_lines.extend(["## Executive Synthesis", self.synthesis, "\n"])
+            
+        md_lines.append("## Gathered Sources\n")
         
         grouped = {}
         for r in combined:
-            src = r.get("source", "unknown").lower()
+            src = r.get("source", "unknown").capitalize()
             if src not in grouped:
                 grouped[src] = []
             grouped[src].append(r)
-        
+            
         for src, items in grouped.items():
-            file_path = os.path.join(export_dir, f"{src}.md")
-            
-            md_lines = [
-                f"# Research Topic: {self.current_topic or 'Untitled'}",
-                f"**Tags:** {', '.join(tags) if tags else 'None'}",
-                f"**Source:** {src}\n",
-            ]
-            
-            if self.synthesis:
-                md_lines.extend(["## Synthesis", self.synthesis, "\n"])
-                
-            md_lines.append("## Retrieved Items\n")
-            
+            md_lines.append(f"### [{src}]")
             for idx, item in enumerate(items, 1):
                 title = item.get("title", "(no title)")
                 link = item.get("link", "")
                 snippet = item.get("snippet", "")
                 
-                md_lines.append(f"### {idx}. {title}")
+                md_lines.append(f"#### {idx}. {title}")
                 if link:
                     md_lines.append(f"**Link:** {link}")
                 md_lines.append(f"\n{snippet}\n")
                 
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write("\n".join(md_lines))
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(md_lines))
                 
-        self.console.print(f"[bold green]Saved {len(combined)} results across {len(grouped)} sources to:[/]\n[cyan]{export_dir}[/]")
+        self.console.print(f"[bold green]Saved {len(combined)} results from {len(grouped)} sources to:[/]\n[cyan]{file_path}[/]")
 
     # ------------------------------------------------------------------
     # Interactive CLI loop
@@ -467,6 +548,25 @@ class ResearchCLI:
                             self.run_research(parts[1])
                         else:
                             self.console.print("[red]Usage: /topic <topic>[/]")
+                    elif cmd == "/tree":
+                        if len(parts) > 1:
+                            raw_args = parts[1].strip()
+                            args = raw_args.rsplit(maxsplit=1)
+                            if len(args) == 2 and args[1].isdigit():
+                                topic = args[0].strip()
+                                depth = int(args[1])
+                            else:
+                                topic = raw_args
+                                depth = 1
+                            
+                            if not topic:
+                                self.console.print("[red]Usage: /tree <topic> [depth][/]")
+                                continue
+
+                            self.safe_root_topic = "".join([c if c.isalnum() else "_" for c in topic])
+                            self.run_tree_research(topic, depth)
+                        else:
+                            self.console.print("[red]Usage: /tree <topic> [depth][/]")
                     elif cmd == "/ask":
                         if len(parts) > 1:
                             self.chat_with_results(parts[1])

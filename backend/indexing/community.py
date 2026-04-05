@@ -375,9 +375,11 @@ def summarize_communities(
     for nid, cid in node_to_community.items():
         nodes_by_comm[cid].append(nid)
 
-    print(f"  -> Summarizing {len(nodes_by_comm)} communities...")
+    total_comms = len(nodes_by_comm)
+    for i, (cid, node_ids) in enumerate(nodes_by_comm.items()):
+        # 1. Start processing log
+        print(f"     [Community] Summarizing community {i+1}/{total_comms} (ID: {cid}, {len(node_ids)} nodes)...", flush=True)
 
-    for cid, node_ids in nodes_by_comm.items():
         # Skip tiny communities (< 3 nodes)
         if len(node_ids) < 3:
             continue
