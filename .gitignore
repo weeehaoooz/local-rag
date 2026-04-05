@@ -36,3 +36,7 @@ backend/.claude/
 # System
 .DS_Store
 Thumbs.db
+
+# IDE
+/.claude/
+
