@@ -402,7 +402,12 @@ class GraphIndexer(BaseIndexer):
             except Exception as e:
                 print(f"     Warning: Failed to save chunk embeddings: {e}")
 
-        # 3. Compute pairwise similarities:
+        # 3. Filter all_chunks that have valid embeddings
+        valid_chunks = [c for c in all_chunks if c["embedding"] is not None and len(c["embedding"]) > 1]
+        if not valid_chunks:
+            return
+
+        # 4. Compute pairwise similarities:
         #    If new_nodes is provided, only check those. Otherwise, check all chunks.
         if new_nodes is not None:
             new_ids = {n.id_ for n in new_nodes}
@@ -410,11 +415,6 @@ class GraphIndexer(BaseIndexer):
         else:
             new_ids = {c["id"] for c in valid_chunks}
             print(f"     Processing all {len(new_ids)} valid chunks...")
-        
-        # Filter all_chunks that have valid embeddings
-        valid_chunks = [c for c in all_chunks if c["embedding"] is not None and len(c["embedding"]) > 1]
-        if not valid_chunks:
-            return
             
         emb_matrix = np.array([c["embedding"] for c in valid_chunks])
         norms = np.linalg.norm(emb_matrix, axis=1, keepdims=True)
