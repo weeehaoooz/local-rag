@@ -462,6 +462,17 @@ _SECTION_HEADING_RE = re.compile(
 _PAGE_MARKER_RE = re.compile(r"\[Page (\d+)\]")
 
 
+def _count_tokens(text: str) -> int:
+    """Helper to count tokens using the global tokenizer."""
+    if not text:
+        return 0
+    try:
+        return len(Settings.tokenizer(text))
+    except Exception:
+        # Fallback to rough estimate if tokenizer fails
+        return len(text) // 4
+
+
 def _split_by_sections(text: str) -> List[Dict[str, Any]]:
     """
     Split *text* at section-heading boundaries.
@@ -556,8 +567,8 @@ def _small_to_big_parse(
     documents: List[Document],
     small_chunk_size: int = 256,
     small_chunk_overlap: int = 32,
-    big_chunk_size: int = 1024,
-    big_chunk_overlap: int = 128,
+    big_chunk_size: int = 512,
+    big_chunk_overlap: int = 64,
     agentic_chunk: bool = False,
     llm: Optional[Any] = None,
 ) -> Tuple[List[TextNode], List[TextNode]]:
@@ -565,17 +576,31 @@ def _small_to_big_parse(
     _llm = llm or _Settings.llm
     _embed_model = _Settings.embed_model
 
+    # 1. Initialize splitters
     small_splitter = SentenceSplitter(
         chunk_size=small_chunk_size,
         chunk_overlap=small_chunk_overlap,
     )
 
+    # Use SemanticSplitter for "Big" chunks to preserve topic coherence
+    # Fallback to SentenceSplitter if requested or if embed_model is missing
+    if not agentic_chunk and _embed_model:
+        big_splitter = SemanticSplitterNodeParser(
+            buffer_size=1,
+            breakpoint_percentile_threshold=95,
+            embed_model=_embed_model,
+        )
+    else:
+        big_splitter = SentenceSplitter(
+            chunk_size=big_chunk_size,
+            chunk_overlap=big_chunk_overlap,
+        )
+
     big_nodes: List[TextNode] = []
     small_nodes: List[TextNode] = []
 
-    max_chars = big_chunk_size * 4
-
     for doc in documents:
+        # Step A: Structural splitting (by pages/sections from loader)
         sections = _split_by_sections(doc.get_content())
         print(
             f"     [chunking] '{doc.metadata.get('file_name', '?')}': "
@@ -583,52 +608,53 @@ def _small_to_big_parse(
             flush=True,
         )
 
-        topic_blocks: List[Dict[str, Any]] = []
-        current_block_text = ""
-        current_block_metadata = {}
-
-        for sec in sections:
-            sec_text = sec["text"]
-            if current_block_text and (len(current_block_text) + len(sec_text) > max_chars * 1.2):
-                topic_blocks.append({"text": current_block_text, "metadata": current_block_metadata})
-                current_block_text = ""
-
-            if not current_block_text:
-                current_block_metadata = {
-                    **doc.metadata,
-                    "page_number": sec["page"],
-                    "section_title": sec["section"],
-                }
-
-            current_block_text += "\n\n" + sec_text if current_block_text else sec_text
-
-        if current_block_text:
-            topic_blocks.append({"text": current_block_text, "metadata": current_block_metadata})
-
         final_parent_docs: List[Document] = []
 
+        # Step B: Semantic Recursive Split
         def _recursive_split(text: str, metadata: dict):
-            if len(text) <= max_chars * 1.1:
+            token_count = _count_tokens(text)
+            
+            # If already small enough, keep as one big node
+            if token_count <= big_chunk_size * 1.1:
                 final_parent_docs.append(Document(text=text, metadata=metadata))
                 return
 
+            # Option 1: Agentic (LLM-based) split - slow but very accurate
             if agentic_chunk and _llm:
-                print(f"     [agentic_chunk] Splitting {len(text)}-char segment...", flush=True)
-                split_idx = _agentic_find_split(text, _llm, target_size=max_chars)
+                print(f"     [agentic_chunk] Splitting {token_count} token segment via LLM...", flush=True)
+                # target_size converted to approx characters for the LLM prompt window
+                split_idx = _agentic_find_split(text, _llm, target_size=big_chunk_size * 4)
                 left, right = text[:split_idx].strip(), text[split_idx:].strip()
                 if left and right:
                     _recursive_split(left, metadata)
                     _recursive_split(right, metadata)
                     return
 
-            splitter = SentenceSplitter(chunk_size=big_chunk_size, chunk_overlap=big_chunk_overlap)
-            parts = splitter.split_text(text)
+            # Option 2: Semantic Split (Embedding similarity) + Fallback to SentenceSplitter
+            # Use big_splitter logic (Semantic or Sentence)
+            parts = big_splitter.split_text(text) if hasattr(big_splitter, "split_text") else []
+            if not parts and hasattr(big_splitter, "get_nodes_from_documents"):
+                # SemanticSplitter only has get_nodes_from_documents
+                temp_nodes = big_splitter.get_nodes_from_documents([Document(text=text)])
+                parts = [n.get_content() for n in temp_nodes]
+
             for p in parts:
-                final_parent_docs.append(Document(text=p, metadata=metadata))
+                if _count_tokens(p) > big_chunk_size * 1.5:
+                    # If semantic split failed to reduce size enough, force sentence split
+                    fallback = SentenceSplitter(chunk_size=big_chunk_size, chunk_overlap=big_chunk_overlap)
+                    sub_parts = fallback.split_text(p)
+                    for sp in sub_parts:
+                        final_parent_docs.append(Document(text=sp, metadata=metadata))
+                else:
+                    final_parent_docs.append(Document(text=p, metadata=metadata))
 
-        for block in topic_blocks:
-            _recursive_split(block["text"], block["metadata"])
+        for sec in sections:
+            _recursive_split(
+                sec["text"], 
+                {**doc.metadata, "page_number": sec["page"], "section_title": sec["section"]}
+            )
 
+        # Step C: Small chunking (Children)
         for parent_doc in final_parent_docs:
             parent_node = TextNode(text=parent_doc.text, metadata=parent_doc.metadata)
             if not parent_node.node_id:
@@ -636,14 +662,15 @@ def _small_to_big_parse(
                 parent_node.id_ = str(uuid.uuid4())
             big_nodes.append(parent_node)
 
-            child_chunks = small_splitter.get_nodes_from_documents(
+            child_nodes = small_splitter.get_nodes_from_documents(
                 [Document(text=parent_node.text, metadata=parent_node.metadata)]
             )
-            for child in child_chunks:
+            for child in child_nodes:
                 if not child.node_id:
                     import uuid
                     child.id_ = str(uuid.uuid4())
 
+                # Clean up relationships for clean Neo4j ingestion
                 for rel_type in (NodeRelationship.SOURCE, NodeRelationship.NEXT, NodeRelationship.PREVIOUS):
                     rel_info = child.relationships.get(rel_type)
                     if rel_info is not None and not rel_info.node_id:

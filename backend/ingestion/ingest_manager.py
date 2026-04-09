@@ -346,6 +346,8 @@ class AsyncIngestionManager:
                 guardrails=guardrails,
                 title=title,
                 kg_prompt_prefix=kg_prefix,
+                small_chunk_size=256,
+                big_chunk_size=512,
             )
 
             # 8. Update tracker + persist

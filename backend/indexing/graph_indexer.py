@@ -67,8 +67,8 @@ class GraphIndexer(BaseIndexer):
         num_passes: int = 1,
         similar_categories: Optional[List[str]] = None,
         guardrails: Optional[Dict] = None,
-        small_chunk_size: int = 512,
-        big_chunk_size: int = 1024,
+        small_chunk_size: int = 256,
+        big_chunk_size: int = 512,
         include_free_form: bool = False,
         agentic_chunk: bool = False,
     ) -> PropertyGraphIndex:

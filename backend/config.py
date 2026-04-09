@@ -3,6 +3,7 @@ from llama_index.core import Settings
 from llama_index.llms.ollama import Ollama
 from llama_index.embeddings.ollama import OllamaEmbedding
 from llama_index.graph_stores.neo4j import Neo4jPropertyGraphStore
+import tiktoken
 
 # Project root is two levels up from backend/config.py
 BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -49,6 +50,18 @@ def setup_models():
     Settings.llm = llm
     Settings.embed_model = embed_model
     Settings.num_workers = max(1, (os.cpu_count() or 4) - 1)
+    
+    # Standardize Chunking to Token-based counts
+    Settings.chunk_size = 512
+    Settings.chunk_overlap = 64
+    
+    # Initialize global tokenizer
+    try:
+        Settings.tokenizer = tiktoken.get_encoding("cl100k_base").encode
+    except Exception:
+        # Fallback to a basic whitespace tokenizer if tiktoken fails
+        Settings.tokenizer = lambda x: x.split()
+
     return llm, embed_model
 
 def get_graph_store():
