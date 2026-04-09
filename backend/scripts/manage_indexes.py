@@ -225,7 +225,7 @@ def main():
     # Clean command
     clean_parser = subparsers.add_parser("clean", help="Perform semantic cleanup of the Knowledge Graph")
     clean_parser.add_argument("--threshold", type=float, default=0.9, help="Similarity threshold for merging nodes")
-    clean_parser.add_argument("--rel-threshold", type=float, default=None, help="Similarity threshold for merging relationships")
+    clean_parser.add_argument("--rel-threshold", type=float, default=None, help="Similarity threshold for merging relationship types (defaults to --threshold)")
 
     # Cluster command
     cluster_parser = subparsers.add_parser("cluster", help="Run community detection and summarization")
@@ -238,7 +238,7 @@ def main():
     # Optimize command
     opt_parser = subparsers.add_parser("optimize", help="Run full suite of KG optimization services (Clean + Cluster + Refine)")
     opt_parser.add_argument("--threshold", type=float, default=0.9, help="Similarity threshold for merging nodes (Cleanup)")
-    opt_parser.add_argument("--rel-threshold", type=float, default=None, help="Similarity threshold for merging relationships")
+    opt_parser.add_argument("--rel-threshold", type=float, default=None, help="Similarity threshold for merging relationship types (defaults to --threshold)")
     opt_parser.add_argument("--resolution", type=float, default=1.0, help="Louvain resolution parameter (Clustering)")
     opt_parser.add_argument("--summarize", action="store_true", default=True, help="Generate LLM summaries for communities (Default: True)")
     opt_parser.add_argument("--no-summarize", dest="summarize", action="store_false", help="Skip LLM community summarization")

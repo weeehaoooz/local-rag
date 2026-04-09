@@ -324,7 +324,7 @@ class GraphCleaner:
                                              param_map={"dup_id": dup_id})
 
     def _normalize_relationship_types(self, threshold: float):
-        """Standardize similar sounding relationship types globally."""
+        """Standardize similar relationship types globally using semantic embeddings."""
         print("  -> Normalizing relationship types...")
         query = "CALL db.relationshipTypes()"
         result = self.graph_store.structured_query(query)
@@ -339,32 +339,83 @@ class GraphCleaner:
         if len(rel_types) < 2:
             return
 
+        # 1. Cleanse and normalize names for embedding/matching
+        # We use a map to keep track of original names
+        type_data = []
+        for rt in rel_types:
+            # Normalize for better embedding: 'WORKS_AT' -> 'works at'
+            clean_name = rt.lower().replace("_", " ").strip()
+            type_data.append({"original": rt, "clean": clean_name})
+
         clusters = []
         visited = set()
-        normalized_map = {rt: rt.upper().replace("_", " ").strip() for rt in rel_types}
-        sorted_types = sorted(rel_types, key=len)
 
-        for i, rt in enumerate(sorted_types):
-            if rt in visited:
-                continue
-            cluster = [rt]
-            visited.add(rt)
-            norm_rt = normalized_map[rt]
+        # 2. Try semantic clustering if embed_model is available
+        if self.embed_model:
+            try:
+                print(f"     Generating embeddings for {len(rel_types)} relationship types...")
+                clean_names = [d["clean"] for d in type_data]
+                # Relationship types are usually few, so we can embed them all
+                embeddings = [self.embed_model.get_text_embedding(name) for name in clean_names]
+                
+                emb_matrix = np.array(embeddings)
+                norms = np.linalg.norm(emb_matrix, axis=1, keepdims=True)
+                norms[norms == 0] = 1e-10
+                normed = emb_matrix / norms
+                sim_matrix = normed @ normed.T
 
-            for j in range(i + 1, len(sorted_types)):
-                other = sorted_types[j]
-                if other in visited:
-                    continue
-                norm_other = normalized_map[other]
-                sim = difflib.SequenceMatcher(None, norm_rt, norm_other).ratio()
-                if sim >= threshold:
-                    cluster.append(other)
-                    visited.add(other)
+                for i in range(len(type_data)):
+                    orig_i = type_data[i]["original"]
+                    if orig_i in visited:
+                        continue
+                    
+                    cluster = [type_data[i]]
+                    visited.add(orig_i)
+                    
+                    for j in range(i + 1, len(type_data)):
+                        orig_j = type_data[j]["original"]
+                        if orig_j in visited:
+                            continue
+                        
+                        if sim_matrix[i, j] >= threshold:
+                            cluster.append(type_data[j])
+                            visited.add(orig_j)
+                    
+                    if len(cluster) > 1:
+                        clusters.append([d["original"] for d in cluster])
+            except Exception as e:
+                print(f"     Warning: Semantic relationship normalization failed: {e}. Falling back to lexical.")
+                visited = set() # Reset visited for lexical pass
 
-            if len(cluster) > 1:
-                clusters.append(cluster)
+        # 3. Lexical fallback/additional pass for remaining types
+        if not clusters or len(visited) < len(rel_types):
+            remaining_types = [d for d in type_data if d["original"] not in visited]
+            if len(remaining_types) >= 2:
+                for i, d_i in enumerate(remaining_types):
+                    orig_i = d_i["original"]
+                    if orig_i in visited:
+                        continue
+                    
+                    cluster = [d_i]
+                    visited.add(orig_i)
+                    
+                    for j in range(i + 1, len(remaining_types)):
+                        d_j = remaining_types[j]
+                        orig_j = d_j["original"]
+                        if orig_j in visited:
+                            continue
+                        
+                        sim = difflib.SequenceMatcher(None, d_i["clean"], d_j["clean"]).ratio()
+                        if sim >= threshold:
+                            cluster.append(d_j)
+                            visited.add(orig_j)
+                    
+                    if len(cluster) > 1:
+                        clusters.append([d["original"] for d in cluster])
 
+        # 4. Perform the merges
         for cluster in clusters:
+            # Pick canonical: shortest name usually preferred for types
             canonical = sorted(cluster, key=len)[0]
             duplicates = [rt for rt in cluster if rt != canonical]
 
