@@ -27,7 +27,7 @@ class RouterService:
         query_lower = query.lower()
         return any(kw in query_lower for kw in global_keywords)
 
-    def classify_query(self, query: str) -> tuple[QueryType, list[str]]:
+    async def classify_query(self, query: str) -> tuple[QueryType, list[str]]:
         system_prompt = (
             "You are an intelligent query router for a RAG system.\n"
             "Given the user's query, classify it into exactly one of three categories:\n"
@@ -42,7 +42,7 @@ class RouterService:
             "{\"type\": \"GLOBAL\", \"keywords\": [\"themes\", \"report\"]}"
         )
         try:
-            response = self.llm.complete(f"{system_prompt}\n\nUser Query: {query}")
+            response = await self.llm.acomplete(f"{system_prompt}\n\nUser Query: {query}")
             raw_text = response.text.strip()
             # Clean possible markdown formatting
             if raw_text.startswith("```json"):

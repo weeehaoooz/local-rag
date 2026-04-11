@@ -192,38 +192,25 @@ class HybridEngine:
         except Exception:
             return ["Tell me about the latest documents."]
 
-    async def get_context_async(self, query: str) -> dict:
+    async def get_context_async(self, query: str, plan: 'ToolPlan' = None) -> dict:
         """
-        Async version of get_context. Uses aretrieve() for all LlamaIndex
-        retrievers so we never call asyncio.run() inside a running event loop.
+        Retrieves context using parallel execution of selected tools.
         """
-        plan = await self.orchestrator.plan_tools(query)
+        if not plan:
+            plan = await self.orchestrator.analyze_request(query)
+            
         tools = plan.tools
         query_type = plan.fallback_query_type
-        print(f"  [Orchestrator] Tools: {tools} | Generic: {plan.is_generic} | Fallback: {query_type.value} | Rationale: {plan.rationale}")
+        entity_hints = plan.keywords
 
         if plan.is_generic and not tools:
-            print(f"  [Engine] No tools selected for generic query. Returning empty context.")
             return {
-                "graph_context": [],
-                "vector_context": [],
-                "summary_context": [],
-                "community_context": [],
-                "sources": [],
-                "query_type": query_type,
-                "tools_used": [],
-                "orchestrator_rationale": plan.rationale,
+                "graph_context": [], "vector_context": [], "summary_context": [],
+                "community_context": [], "sources": [], "query_type": query_type,
+                "tools_used": [], "orchestrator_rationale": plan.rationale,
             }
-        
-        # If generic, skip specific keyword classification but still run tools like community_search
-        entity_hints = []
-        if not plan.is_generic:
-            _, entity_hints = self.router.classify_query(query)
-        else:
-            print(f"  [Engine] Generic query detected. Skipping keyword classification but running global tools if selected.")
 
         all_sources = []
-
         def _to_dicts(nodes):
             res = []
             for n in nodes:
@@ -233,120 +220,142 @@ class HybridEngine:
                 res.append({"text": actual_node.get_content(), "source": title, "metadata": meta})
             return res
 
-        # 1. Semantic (Vector) & Lexical (BM25)
-        vector_candidates = []
-        if self.vector_index and "vector_search" in tools:
-            try:
-                # HyDE for local semantic search
-                print(f"  [Engine] Running vector_search for query: {query[:50]}...")
-                vector_query = await self.transformer.generate_hyde_document(query)
-                nodes = await self.vector_index.as_retriever(similarity_top_k=5).aretrieve(vector_query)
-                vector_candidates = _to_dicts(nodes)
-                all_sources.extend(self.formatter.extract_sources(nodes))
-                print(f"  [Engine] Found {len(vector_candidates)} vector candidates.")
-            except Exception as e:
-                print(f"  [Engine] vector_search failed: {e}")
+        # Define parallel tasks
+        tasks = []
+        task_names = []
 
-        bm25_candidates = []
-        if self.bm25_retriever and "vector_search" in tools:
-            try:
-                # BM25Retriever doesn't have aretrieve — run in executor to avoid blocking
-                print(f"  [Engine] Running bm25_search...")
-                loop = asyncio.get_event_loop()
-                nodes = await loop.run_in_executor(None, self.bm25_retriever.retrieve, query)
-                bm25_candidates = _to_dicts(nodes)
-                all_sources.extend(self.formatter.extract_sources(nodes))
-                print(f"  [Engine] Found {len(bm25_candidates)} BM25 candidates.")
-            except Exception as e:
-                print(f"  [Engine] bm25_search failed: {e}")
+        # 1. Vector Search Task (includes HyDE)
+        async def vector_task():
+            if not self.vector_index: return []
+            v_query = await self.transformer.generate_hyde_document(query)
+            nodes = await self.vector_index.as_retriever(similarity_top_k=5).aretrieve(v_query)
+            processed = _to_dicts(nodes)
+            all_sources.extend(self.formatter.extract_sources(nodes))
+            return processed
 
-        # 2. Knowledge Graph — use aretrieve() to avoid nested asyncio.run()
-        graph_candidates = []
-        expanded_entities = []
+        if "vector_search" in tools:
+            tasks.append(vector_task())
+            task_names.append("vector")
+
+        # 2. BM25 Search Task
+        async def bm25_task():
+            if not self.bm25_retriever: return []
+            loop = asyncio.get_event_loop()
+            nodes = await loop.run_in_executor(None, self.bm25_retriever.retrieve, query)
+            processed = _to_dicts(nodes)
+            all_sources.extend(self.formatter.extract_sources(nodes))
+            return processed
+
+        if "vector_search" in tools and self.bm25_retriever:
+            tasks.append(bm25_task())
+            task_names.append("bm25")
+
+        # 3. Graph Search Task
+        async def graph_task():
+            kg_retriever = self.kg_index.as_retriever(include_text=True, similarity_top_k=5)
+            nodes = await kg_retriever.aretrieve(query)
+            processed = _to_dicts(nodes)
+            all_sources.extend(self.formatter.extract_sources(nodes))
+            return processed
+
         if "graph_search" in tools:
-            try:
-                print(f"  [Engine] Running graph_search...")
-                kg_retriever = self.kg_index.as_retriever(include_text=True, similarity_top_k=5)
-                nodes = await kg_retriever.aretrieve(query)
-                graph_candidates = _to_dicts(nodes)
-                all_sources.extend(self.formatter.extract_sources(nodes))
+            tasks.append(graph_task())
+            task_names.append("graph")
 
+        # 4. Summary Search Task
+        async def summary_task():
+            nodes = await self.summary_index.as_retriever().aretrieve(query)
+            processed = [(n.get_content(), "Summary") for n in nodes[:2]]
+            all_sources.extend(self.formatter.extract_sources(nodes))
+            return processed
+
+        if "summary_search" in tools and self.summary_index:
+            tasks.append(summary_task())
+            task_names.append("summary")
+
+        # 5. Community Search Task
+        async def community_task():
+            communities = self.community_summarizer.get_relevant_summaries(query, top_k=3)
+            return [(c.get("summary", ""), f"Community {c.get('community_id')}") for c in communities]
+
+        if "community_search" in tools and self.community_summarizer:
+            tasks.append(community_task())
+            task_names.append("community")
+
+        # 6. Web/ArXiv Search Tasks
+        async def web_task():
+            results = self.web_searcher.search_text([query])
+            return [(r["snippet"], r["title"], r["link"]) for r in results]
+
+        if "web_search" in tools and self.web_searcher:
+            tasks.append(web_task())
+            task_names.append("web")
+
+        async def arxiv_task():
+            results = self.arxiv_searcher.search([query])
+            return [(r["summary"], r["title"], r["id"]) for r in results]
+
+        if "arxiv_search" in tools and self.arxiv_searcher:
+            tasks.append(arxiv_task())
+            task_names.append("arxiv")
+
+        # Execute all tasks in parallel
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Unpack results
+        res_map = {name: val for name, val in zip(task_names, results) if not isinstance(val, Exception)}
+        
+        vector_candidates = res_map.get("vector", [])
+        bm25_candidates = res_map.get("bm25", [])
+        graph_candidates = res_map.get("graph", [])
+        summary_results = res_map.get("summary", [])
+        community_results = res_map.get("community", [])
+        
+        # Handle Web/ArXiv results separately (they append to all_sources)
+        fused_context = []
+        for r in res_map.get("web", []):
+            fused_context.append((r[0], r[1]))
+            all_sources.append({"title": r[1], "category": "Web", "file": r[2]})
+        for r in res_map.get("arxiv", []):
+            fused_context.append((r[0], r[1]))
+            all_sources.append({"title": r[1], "category": "ArXiv", "file": r[2]})
+
+        # 7. Fusion & Graph Post-processing
+        expanded_entities = []
+        if vector_candidates or bm25_candidates or graph_candidates:
+            fusion_input = [l for l in [vector_candidates, bm25_candidates, graph_candidates] if l]
+            if fusion_input:
+                fused_results = self.fusion_service.reciprocal_rank_fusion(fusion_input)
+                top_fused = fused_results[:5]
+                fused_context.extend([(c["text"], c["source"]) for c in top_fused])
+                
+                # Expand seeds from keywords + graph hits
                 seeds = entity_hints + [n['metadata'].get('name') for n in graph_candidates if n['metadata'].get('name')]
                 if seeds:
-                    expanded_entities = self.graph_service.expand_graph_context(list(set(seeds)), max_hops=1)
-                print(f"  [Engine] Found {len(graph_candidates)} graph candidates.")
-            except Exception as e:
-                print(f"  [Engine] graph_search failed: {e}")
+                    expanded_entities = await self.graph_service.expand_graph_context(list(set(seeds)), max_hops=1)
+                
+                # Hybrid Traversal
+                traversal = self.graph_service.hybrid_graph_traversal(top_fused)
+                expanded_entities.extend(traversal.get("entities", []))
 
-        # 3. Fusion & Hybrid Traversal
-        fused_context = []
-        if "vector_search" in tools or "graph_search" in tools:
-            try:
-                fusion_input = [l for l in [vector_candidates, bm25_candidates, graph_candidates] if l]
-                if fusion_input:
-                    fused_results = self.fusion_service.reciprocal_rank_fusion(fusion_input)
-                    top_fused = fused_results[:5]
-                    fused_context = [(c["text"], c["source"]) for c in top_fused]
-
-                    traversal = self.graph_service.hybrid_graph_traversal(top_fused)
-                    expanded_entities.extend(traversal.get("entities", []))
-                    print(f"  [Engine] Rank fusion complete. {len(fused_context)} results.")
-            except Exception as e:
-                print(f"  [Engine] Fusion/Traversal failed: {e}")
-
-        # 4. Global Context (Summaries & Communities)
-        summary_context = []
-        if self.summary_index and "summary_search" in tools:
-            try:
-                print(f"  [Engine] Running summary_search...")
-                nodes = await self.summary_index.as_retriever().aretrieve(query)
-                summary_context = [(n.get_content(), "Summary") for n in nodes[:2]]
-                all_sources.extend(self.formatter.extract_sources(nodes))
-                print(f"  [Engine] Found {len(summary_context)} summary candidates.")
-            except Exception as e:
-                print(f"  [Engine] summary_search failed: {e}")
-
-        community_context = []
-        if self.community_summarizer and "community_search" in tools:
-            try:
-                print(f"  [Engine] Running community_search...")
-                communities = self.community_summarizer.get_relevant_summaries(query, top_k=3)
-                for c in communities:
-                    community_context.append((c.get("summary", ""), f"Community {c.get('community_id')}"))
-                print(f"  [Engine] Found {len(community_context)} community summaries.")
-            except Exception as e:
-                print(f"  [Engine] community_search failed: {e}")
-
-        # 5. Entity Summarization
+        # 8. Entity Summarization
         summarized_graph = []
-        try:
-            summarized_graph = self.graph_service.summarize_entity_context(
+        if graph_candidates or expanded_entities:
+            summarized_graph = await self.graph_service.summarize_entity_context(
                 [(c["text"], c["source"]) for c in graph_candidates],
                 expanded_entities
             )
-        except Exception as e:
-            print(f"  [Engine] graph summarization failed: {e}")
 
-        # 6. Web & ArXiv Context
-        if "web_search" in tools and self.web_searcher:
-            try:
-                print("  [Orchestrator] Running web_search...")
-                web_results = self.web_searcher.search_text([query])
-                for r in web_results:
-                    fused_context.append((r["snippet"], r["title"]))
-                    all_sources.append({"title": r["title"], "category": "Web", "file": r["link"]})
-            except Exception as e:
-                print(f"  [Orchestrator] web_search failed: {e}")
-
-        if "arxiv_search" in tools and self.arxiv_searcher:
-            try:
-                print("  [Orchestrator] Running arxiv_search...")
-                arxiv_results = self.arxiv_searcher.search([query])
-                for r in arxiv_results:
-                    fused_context.append((r["summary"], r["title"]))
-                    all_sources.append({"title": r["title"], "category": "ArXiv", "file": r["id"]})
-            except Exception as e:
-                print(f"  [Orchestrator] arxiv_search failed: {e}")
+        return {
+            "graph_context": summarized_graph,
+            "vector_context": fused_context,
+            "summary_context": summary_results,
+            "community_context": community_results,
+            "sources": all_sources,
+            "query_type": query_type,
+            "tools_used": tools,
+            "orchestrator_rationale": plan.rationale,
+        }
 
         return {
             "graph_context": summarized_graph,
@@ -399,59 +408,53 @@ class HybridEngine:
     ) -> dict:
         """
         Async main entry point for chat interaction.
-
-        Uses a Self-RAG / CRAG agentic loop:
-          1. Retrieve context for the current query.
-          2. Grade the retrieval — if it fails, rewrite the query and retry.
-          3. Generate an answer from the (graded) context.
-          4. Grade the answer for hallucinations — if it fails, rewrite and retry.
-          5. Return the final answer with reflection diagnostics.
         """
         reflection_loops = 0
         retrieval_grade_result = "pass"
         answer_grade_result = "grounded"
 
-        # 1. Transform: Coreference Resolution
+        # 1. Consolidated Analysis: Coref + Decomposition + Tools + Keywords
         history = history or []
-        resolved_query = await self.transformer.resolve_coreference(user_message, history)
-
-        # 2. Decompose: Split compound queries
-        sub_queries = await self.decomposer.split_query(resolved_query)
+        plan = await self.orchestrator.analyze_request(user_message, history)
+        resolved_query = plan.resolved_query
+        sub_queries = plan.sub_queries
+        
+        print(f"  [Agent] Resolved: {resolved_query} | Sub-queries: {sub_queries}")
 
         # Container for pooled contexts
         all_context = {
             "graph_context": [], "vector_context": [], "summary_context": [],
             "community_context": [], "sources": [], "tools_used": [],
-            "orchestrator_rationale": f"Decomposed {len(sub_queries)} queries.",
-            "query_type": None
+            "orchestrator_rationale": plan.rationale,
+            "query_type": plan.fallback_query_type
         }
         all_context_chunks = []
 
-        # ── Retrieval → Grade → (Rewrite + Retry) loop ───────────────────
-        for sq in sub_queries:
-            print(f"  [Agent] Processing sub-query: {sq}")
-            sq_context = await self.get_context_async(sq)
+        # ── Parallel Retrieval & Processing ─────────────────────────────
+        async def process_sub_query(sq):
+            nonlocal reflection_loops, retrieval_grade_result
+            sq_context = await self.get_context_async(sq, plan=plan)
             sq_chunks = self._collect_context_texts(sq_context)
 
-            # Grading loop per sub-query
-            for loop in range(max_reflection_loops):
-                r_grade = await self.reflection.grade_retrieval(sq, sq_chunks)
-                print(f"  [Reflection] Retrieval grade for '{sq}' (loop {loop}): relevant={r_grade.relevant} — {r_grade.reason}")
+            # Grading loop per sub-query (SKIPPED in fast mode)
+            if mode != "fast":
+                for loop in range(max_reflection_loops):
+                    r_grade = await self.reflection.grade_retrieval(sq, sq_chunks)
+                    if r_grade.relevant:
+                        break
+                    retrieval_grade_result = "fail"
+                    reflection_loops += 1
+                    if loop < max_reflection_loops - 1:
+                        sq = await self.reflection.rewrite_query(sq, r_grade.reason)
+                        sq_context = await self.get_context_async(sq, plan=plan)
+                        sq_chunks = self._collect_context_texts(sq_context)
+            
+            return sq_context, sq_chunks
 
-                if r_grade.relevant:
-                    break  # retrieval passed
+        # Run all sub-queries in parallel
+        sub_results = await asyncio.gather(*[process_sub_query(sq) for sq in sub_queries])
 
-                retrieval_grade_result = "fail"
-                reflection_loops += 1
-
-                if loop < max_reflection_loops - 1:
-                    sq = await self.reflection.rewrite_query(sq, r_grade.reason)
-                    print(f"  [Reflection] Rewritten sub-query: {sq}")
-                    sq_context = await self.get_context_async(sq)
-                    sq_chunks = self._collect_context_texts(sq_context)
-                else:
-                    print("  [Reflection] Max retrieval loops reached for sub-query.")
-
+        for sq_context, sq_chunks in sub_results:
             # Merge results into pooled context
             all_context["graph_context"].extend(sq_context.get("graph_context", []))
             all_context["vector_context"].extend(sq_context.get("vector_context", []))
@@ -465,9 +468,6 @@ class HybridEngine:
             for t in sq_context.get("tools_used", []):
                 if t not in all_context["tools_used"]:
                     all_context["tools_used"].append(t)
-
-            if not all_context["query_type"]:
-                all_context["query_type"] = sq_context.get("query_type")
 
             all_context_chunks.extend(sq_chunks)
 
@@ -489,33 +489,31 @@ class HybridEngine:
         
         tps = completion_tkns / ans_duration if ans_duration > 0 else 0.0
 
-        # ── Answer grounding check ───────────────────────────────────────
-        a_grade = await self.reflection.grade_answer(user_message, all_context_chunks, answer_text)
-        print(f"  [Reflection] Answer grade: grounded={a_grade.grounded} — {a_grade.reason}")
+        # ── Answer grounding check (SKIPPED in fast mode) ────────────────
+        if mode != "fast":
+            a_grade = await self.reflection.grade_answer(user_message, all_context_chunks, answer_text)
+            print(f"  [Reflection] Answer grade: grounded={a_grade.grounded} — {a_grade.reason}")
 
-        if not a_grade.grounded and reflection_loops < max_reflection_loops:
-            answer_grade_result = "ungrounded"
-            reflection_loops += 1
-            print("  [Reflection] Answer ungrounded — attempting one corrective rewrite.")
-
-            corrective_query = await self.reflection.rewrite_query(
-                user_message,
-                failure_reason=f"The answer was ungrounded. Reason: {a_grade.reason}. Retrieve factual information to correct this."
-            )
-            corrective_context = await self.get_context_async(corrective_query)
-            corrective_chunks = self._collect_context_texts(corrective_context)
-
-            corrective_prompt = self._build_prompt(corrective_context, user_message, system_prompt)
-            corrective_response = await self.llm.acomplete(corrective_prompt)
-
-            final_a_grade = await self.reflection.grade_answer(user_message, corrective_chunks, corrective_response.text)
-
-            if final_a_grade.grounded:
-                answer_text = corrective_response.text
-                all_context = corrective_context
-                answer_grade_result = "grounded"
+            if not a_grade.grounded and reflection_loops < max_reflection_loops:
+                answer_grade_result = "ungrounded"
+                reflection_loops += 1
+                corrective_query = await self.reflection.rewrite_query(
+                    user_message,
+                    failure_reason=f"The answer was ungrounded. Reason: {a_grade.reason}."
+                )
+                corrective_context = await self.get_context_async(corrective_query, plan=plan)
+                corrective_chunks = self._collect_context_texts(corrective_context)
+                corrective_prompt = self._build_prompt(corrective_context, user_message, system_prompt)
+                corrective_response = await self.llm.acomplete(corrective_prompt)
+                final_a_grade = await self.reflection.grade_answer(user_message, corrective_chunks, corrective_response.text)
+                if final_a_grade.grounded:
+                    answer_text = corrective_response.text
+                    all_context = corrective_context
+                    answer_grade_result = "grounded"
+            else:
+                answer_grade_result = "grounded" if a_grade.grounded else "ungrounded"
         else:
-            answer_grade_result = "grounded" if a_grade.grounded else "ungrounded"
+            answer_grade_result = "skipped"
 
         return {
             "response": answer_text,
@@ -556,48 +554,46 @@ class HybridEngine:
         def _yield_final(data: dict):
             return "data: " + json.dumps({"type": "done", "response": data}) + "\n\n"
 
-        yield _yield_status("Resolving coreferences...")
+        yield _yield_status("Analyzing request...")
         history = history or []
-        resolved_query = await self.transformer.resolve_coreference(user_message, history)
-
-        yield _yield_status("Decomposing queries...")
-        sub_queries = await self.decomposer.split_query(resolved_query)
+        plan = await self.orchestrator.analyze_request(user_message, history)
+        resolved_query = plan.resolved_query
+        sub_queries = plan.sub_queries
 
         all_context = {
             "graph_context": [], "vector_context": [], "summary_context": [],
             "community_context": [], "sources": [], "tools_used": [],
-            "orchestrator_rationale": f"Decomposed {len(sub_queries)} queries.",
-            "query_type": None
+            "orchestrator_rationale": plan.rationale,
+            "query_type": plan.fallback_query_type
         }
         all_context_chunks = []
         reflection_loops = 0
-        retrieval_grade_result = "pass"
-        answer_grade_result = "grounded"
+        retrieval_grade_result = "pass" if mode == "fast" else "ungraded"
+        answer_grade_result = "grounded" if mode == "fast" else "ungraded"
 
-        for sq in sub_queries:
-            yield _yield_status(f"Retrieving context for: {sq[:30]}...")
-            sq_context = await self.get_context_async(sq)
+        async def process_sq_status(sq):
+            nonlocal reflection_loops, retrieval_grade_result
+            # Status yielding is harder from inside a gather, so we'll just yield start
+            sq_context = await self.get_context_async(sq, plan=plan)
             sq_chunks = self._collect_context_texts(sq_context)
 
-            for loop_idx in range(max_reflection_loops):
-                yield _yield_status(f"Grading retrieval (Loop {loop_idx+1})")
-                r_grade = await self.reflection.grade_retrieval(sq, sq_chunks)
+            if mode != "fast":
+                for loop_idx in range(max_reflection_loops):
+                    r_grade = await self.reflection.grade_retrieval(sq, sq_chunks)
+                    if r_grade.relevant:
+                        break
+                    retrieval_grade_result = "fail"
+                    reflection_loops += 1
+                    if loop_idx < max_reflection_loops - 1:
+                        sq = await self.reflection.rewrite_query(sq, r_grade.reason)
+                        sq_context = await self.get_context_async(sq, plan=plan)
+                        sq_chunks = self._collect_context_texts(sq_context)
+            return sq_context, sq_chunks
 
-                if r_grade.relevant:
-                    break
+        yield _yield_status(f"Retrieving context for {len(sub_queries)} queries...")
+        sub_results = await asyncio.gather(*[process_sq_status(sq) for sq in sub_queries])
 
-                retrieval_grade_result = "fail"
-                reflection_loops += 1
-
-                if loop_idx < max_reflection_loops - 1:
-                    yield _yield_status("Rewriting query...")
-                    sq = await self.reflection.rewrite_query(sq, r_grade.reason)
-                    yield _yield_status("Re-retrieving context...")
-                    sq_context = await self.get_context_async(sq)
-                    sq_chunks = self._collect_context_texts(sq_context)
-                else:
-                    break
-
+        for sq_context, sq_chunks in sub_results:
             all_context["graph_context"].extend(sq_context.get("graph_context", []))
             all_context["vector_context"].extend(sq_context.get("vector_context", []))
             all_context["summary_context"].extend(sq_context.get("summary_context", []))
@@ -608,8 +604,6 @@ class HybridEngine:
             for t in sq_context.get("tools_used", []):
                 if t not in all_context["tools_used"]:
                     all_context["tools_used"].append(t)
-            if not all_context["query_type"]:
-                all_context["query_type"] = sq_context.get("query_type")
             all_context_chunks.extend(sq_chunks)
 
         full_prompt = self._build_prompt(all_context, user_message, system_prompt)
@@ -631,40 +625,42 @@ class HybridEngine:
         ans_duration = end_t - start_t
         tps = token_count / ans_duration if ans_duration > 0 else 0.0
 
-        yield _yield_status("Evaluating groundedness...")
-        a_grade = await self.reflection.grade_answer(user_message, all_context_chunks, answer_text)
+        if mode != "fast":
+            yield _yield_status("Evaluating groundedness...")
+            a_grade = await self.reflection.grade_answer(user_message, all_context_chunks, answer_text)
 
-        if not a_grade.grounded and reflection_loops < max_reflection_loops:
-            answer_grade_result = "ungrounded"
-            reflection_loops += 1
-            yield _yield_status("Answer ungrounded, correcting...")
+            if not a_grade.grounded and reflection_loops < max_reflection_loops:
+                answer_grade_result = "ungrounded"
+                reflection_loops += 1
+                yield _yield_status("Answer ungrounded, correcting...")
 
-            corrective_query = await self.reflection.rewrite_query(
-                user_message,
-                failure_reason=f"The answer was ungrounded. Reason: {a_grade.reason}."
-            )
-            corrective_context = await self.get_context_async(corrective_query)
-            corrective_chunks = self._collect_context_texts(corrective_context)
-            corrective_prompt = self._build_prompt(corrective_context, user_message, system_prompt)
+                corrective_query = await self.reflection.rewrite_query(
+                    user_message,
+                    failure_reason=f"The answer was ungrounded. Reason: {a_grade.reason}."
+                )
+                corrective_context = await self.get_context_async(corrective_query, plan=plan)
+                corrective_chunks = self._collect_context_texts(corrective_context)
+                corrective_prompt = self._build_prompt(corrective_context, user_message, system_prompt)
 
-            yield _yield_status("Generating answer...", tokens=0)
-            cor_gen = await self.llm.astream_complete(corrective_prompt)
-            cor_text = ""
-            cor_tokens = 0
-            async for chunk in cor_gen:
-                cor_text += chunk.delta
-                cor_tokens += 1
-                if cor_tokens % 5 == 0:
-                    yield _yield_status("Generating answer...", tokens=cor_tokens)
+                yield _yield_status("Generating answer...", tokens=0)
+                cor_gen = await self.llm.astream_complete(corrective_prompt)
+                cor_text = ""
+                cor_tokens = 0
+                async for chunk in cor_gen:
+                    cor_text += chunk.delta
+                    cor_tokens += 1
+                    if cor_tokens % 5 == 0:
+                        yield _yield_status("Generating answer...", tokens=cor_tokens)
 
-            final_a_grade = await self.reflection.grade_answer(user_message, corrective_chunks, cor_text)
-
-            if final_a_grade.grounded:
-                answer_text = cor_text
-                all_context = corrective_context
-                answer_grade_result = "grounded"
+                final_a_grade = await self.reflection.grade_answer(user_message, corrective_chunks, cor_text)
+                if final_a_grade.grounded:
+                    answer_text = cor_text
+                    all_context = corrective_context
+                    answer_grade_result = "grounded"
+            else:
+                answer_grade_result = "grounded" if a_grade.grounded else "ungrounded"
         else:
-            answer_grade_result = "grounded" if a_grade.grounded else "ungrounded"
+            answer_grade_result = "skipped"
 
         final_response = {
             "response": answer_text,

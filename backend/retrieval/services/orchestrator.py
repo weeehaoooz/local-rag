@@ -11,11 +11,15 @@ class ToolPlan:
     rationale: str
     fallback_query_type: QueryType
     is_generic: bool = False
+    sub_queries: list[str] = field(default_factory=list)
+    keywords: list[str] = field(default_factory=list)
+    resolved_query: str = ""
 
 class ToolOrchestrator:
     """
     LLM-driven tool orchestrator for the Hybrid RAG engine.
-    Given a query, it selects the appropriate combination of retrieval tools.
+    Given a query, it selects the appropriate combination of retrieval tools
+    and performs pre-processing (decomposition, coref resolution).
     """
     
     AVAILABLE_TOOLS = [
@@ -49,84 +53,103 @@ class ToolOrchestrator:
         self.llm = llm
         self.fail_open = fail_open
         
-    async def plan_tools(self, query: str) -> ToolPlan:
+    async def analyze_request(self, query: str, history: list[dict] = None) -> ToolPlan:
         """
-        Produce a plan of tools to use to answer the query.
+        One-stop shop for query analysis:
+        1. Coreference resolution (from history)
+        2. Query decomposition (if complex)
+        3. Tool selection
+        4. Keyword extraction
+        5. Query type classification
         """
         tools_desc = "\n".join([f"- {t['name']}: {t['description']}" for t in self.AVAILABLE_TOOLS])
         
+        # Format history for coref resolution
+        history_str = ""
+        if history:
+            recent = history[-4:]
+            parts = []
+            for t in recent:
+                role = t.get("role", "User").upper()
+                content = t.get("content", t.get("message", ""))
+                parts.append(f"{role}: {content}")
+            history_str = "\n".join(parts)
+
         prompt = (
-            "You are an intelligent RAG query router and tool orchestrator.\n"
-            "Your job is to select the most appropriate combination of retrieval tools to gather context for the user's query.\n\n"
-            f"Available Tools:\n{tools_desc}\n\n"
-            "Guidelines:\n"
-            "- You can select multiple tools if necessary (e.g., passing 2-3 tools in the list).\n"
-            "- Favor 'vector_search' and 'graph_search' for standard localized questions.\n"
-            "- DO NOT use 'web_search' or 'arxiv_search' unless explicitly implied by the query (e.g. 'latest news', 'search the web', 'academic papers').\n"
-            "- Identify if the query is too generic, conversational, or lacks context for a meaningful search (e.g. 'hi', 'how are you', 'tell me something', 'explain it').\n"
-            "- If a query is generic or broad but relates to the knowledge base (e.g. 'tell me something', 'what is in here?'), favor 'community_search' or 'summary_search' instead of 'vector_search'.\n"
-            "- Determine a fallback generic query type: 'LOCAL', 'GLOBAL', 'HYBRID', or 'GENERIC'.\n\n"
-            "You MUST respond with valid JSON and nothing else:\n"
+            "You are an expert RAG query analyzer and orchestrator.\n"
+            "Analyze the user's latest query in the context of the chat history and provide a comprehensive execution plan.\n\n"
+            f"--- CHAT HISTORY ---\n{history_str or 'No history'}\n\n"
+            f"--- LATEST USER QUERY ---\n{query}\n\n"
+            f"--- AVAILABLE SEARCH TOOLS ---\n{tools_desc}\n\n"
+            "Your tasks:\n"
+            "1. RESOLVE COREFERENCE: If the query uses pronouns like 'it', 'they', or 'that project', rewrite it to be standalone using entities from history.\n"
+            "2. DECOMPOSE: If the query is complex (asks for comparisons or multiple facts), break it into 1-3 independent sub-queries.\n"
+            "3. SELECT TOOLS: Choose the best tools from the list above for EACH sub-query (merged set).\n"
+            "4. EXTRACT KEYWORDS: Identify primary entities and concepts for keyword-based search.\n"
+            "5. CLASSIFY: Determine if it's LOCAL (facts), GLOBAL (themes), HYBRID, or GENERIC (short/conversational).\n\n"
+            "OUTPUT FORMAT: You MUST return valid JSON ONLY:\n"
             "{\n"
-            "  \"tools\": [\"tool_name_1\", \"tool_name_2\"],\n"
+            "  \"resolved_query\": \"Standalone rewritten query\",\n"
+            "  \"sub_queries\": [\"sub-query 1\", \"sub-query 2\"],\n"
+            "  \"tools\": [\"tool1\", \"tool2\"],\n"
+            "  \"keywords\": [\"keyword1\", \"keyword2\"],\n"
+            "  \"fallback_type\": \"LOCAL|GLOBAL|HYBRID|GENERIC\",\n"
             "  \"is_generic\": true|false,\n"
-            "  \"rationale\": \"Brief explanation of your selection\",\n"
-            "  \"fallback_type\": \"LOCAL|GLOBAL|HYBRID|GENERIC\"\n"
-            "}\n\n"
-            f"User Query: {query}"
+            "  \"rationale\": \"Brief explanation\"\n"
+            "}"
         )
 
         try:
-            print(f"\n  [Orchestrator] Planning tools for: {query[:50]}...")
+            print(f"\n  [Orchestrator] Analyzing request: {query[:50]}...")
             response = await self.llm.acomplete(prompt)
             raw_text = response.text.strip()
             
-            # Clean possible markdown formatting
-            if raw_text.startswith("```"):
-                raw_text = raw_text.split("```")[1]
-                if raw_text.startswith("json"):
-                    raw_text = raw_text[4:]
-                raw_text = raw_text.strip()
-                
+            # Extract JSON
             start = raw_text.find("{")
             end = raw_text.rfind("}") + 1
             if start != -1 and end > start:
                 parsed = json.loads(raw_text[start:end])
                 
-                tools = parsed.get("tools", [])
-                rationale = parsed.get("rationale", "")
+                resolved = parsed.get("resolved_query", query)
+                sub_queries = parsed.get("sub_queries", [resolved])
+                tools = parsed.get("tools", ["vector_search"])
+                keywords = parsed.get("keywords", [])
                 is_generic = parsed.get("is_generic", False)
+                rationale = parsed.get("rationale", "")
                 
-                # Filter to only valid tools
+                # Validation
                 valid_tools = [t for t in tools if any(at["name"] == t for at in self.AVAILABLE_TOOLS)]
+                if not valid_tools and not is_generic:
+                    valid_tools = ["vector_search", "graph_search"]
                 
-                # Fallback Type
                 qtype_str = parsed.get("fallback_type", "UNKNOWN").upper()
                 try:
                     fallback_type = QueryType(qtype_str)
                 except ValueError:
                     fallback_type = QueryType.UNKNOWN
-                    
-                if not valid_tools and not is_generic:
-                    # Give it a sane default if the list was empty AND it's not marked as generic
-                    valid_tools = ["vector_search", "graph_search"]
-                
-                print(f"  [Orchestrator] Selected tools: {valid_tools} | Generic: {is_generic}")
-                print(f"  [Orchestrator] Rationale: {rationale}")
-                    
+
                 return ToolPlan(
                     tools=valid_tools,
                     rationale=rationale,
                     fallback_query_type=fallback_type,
-                    is_generic=is_generic
+                    is_generic=is_generic,
+                    sub_queries=sub_queries,
+                    keywords=keywords,
+                    resolved_query=resolved
                 )
-                
         except Exception as e:
-            logger.error(f"[Orchestrator] Failed to parse tool plan: {str(e)}")
-            print(f"  [Orchestrator] Planning failed ({e}). Using hard fallback.")
-            
-        # Hard Fallback
-        return self._hard_fallback_plan(query)
+            logger.error(f"[Orchestrator] Consolidated analysis failed: {e}")
+        
+        # Fallback to hard heuristics
+        legacy_plan = self._hard_fallback_plan(query)
+        legacy_plan.resolved_query = query
+        legacy_plan.sub_queries = [query]
+        return legacy_plan
+
+    async def plan_tools(self, query: str) -> ToolPlan:
+        """Legacy method for targeted tool selection."""
+        # Wrap the new analysis but without history for backward compatibility if needed
+        return await self.analyze_request(query)
 
     def _hard_fallback_plan(self, query: str) -> ToolPlan:
         # Very basic heuristic fallback if LLM fails completely

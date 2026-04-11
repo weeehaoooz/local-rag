@@ -8,11 +8,11 @@ class GraphService:
         self.llm = llm
         self.graph_store = graph_store
 
-    def expand_graph_context(
+    async def expand_graph_context(
         self,
         seed_entities: list[str],
-        max_hops: int = 2,
-        limit: int = 30,
+        max_hops: int = 1,
+        limit: int = 20,
     ) -> list[dict]:
         """
         Given a list of seed entity names, traverse 1..max_hops in Neo4j
@@ -49,13 +49,18 @@ class GraphService:
         LIMIT $limit
         """
         try:
-            results = self.graph_store.structured_query(
-                query,
-                param_map={
-                    "entity_names": normalized_seeds,
-                    "raw_names": seed_entities,
-                    "limit": limit,
-                },
+            import asyncio
+            loop = asyncio.get_event_loop()
+            results = await loop.run_in_executor(
+                None, 
+                lambda: self.graph_store.structured_query(
+                    query,
+                    param_map={
+                        "entity_names": normalized_seeds,
+                        "raw_names": seed_entities,
+                        "limit": limit,
+                    },
+                )
             )
             expanded = []
             if isinstance(results, list):
@@ -94,7 +99,7 @@ class GraphService:
             print(f"  [N-Hop] Expansion failed: {e}")
             return []
 
-    def summarize_entity_context(
+    async def summarize_entity_context(
         self,
         graph_context: list[tuple[str, str]],
         expanded_entities: list[dict],
@@ -147,9 +152,10 @@ class GraphService:
         )
 
         try:
-            response = self.llm.complete(prompt).text.strip()
+            response = await self.llm.acomplete(prompt)
+            summary_text = response.text.strip()
             # Return as a single summarized block
-            return [(response, "Knowledge Graph (Summarized)")]
+            return [(summary_text, "Knowledge Graph (Summarized)")]
         except Exception as e:
             print(f"  [Entity Summary] LLM summarization failed: {e}")
             return graph_context  # fallback to raw context
