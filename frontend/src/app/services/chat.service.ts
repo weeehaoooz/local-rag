@@ -240,11 +240,38 @@ export class ChatService {
         content: 'Sorry, something went wrong. Please make sure the API server is running and try again.',
         isStreaming: false,
         processingState: undefined,
+        error: true,
       });
       this.isLoading.set(false);
       this._persist();
       console.error('Chat API error:', err);
     });
+  }
+
+  retryMessage(assistantMsgId: string): void {
+    const convId = this.activeConversationId();
+    if (!convId) return;
+
+    const conv = this.activeConversation();
+    if (!conv) return;
+
+    const assistantIdx = conv.messages.findIndex(m => m.id === assistantMsgId);
+    if (assistantIdx === -1) return;
+
+    const userMsg = conv.messages[assistantIdx - 1];
+    if (!userMsg || userMsg.role !== 'user') return;
+
+    // Remove the failed assistant message
+    this.conversations.update(cs =>
+      cs.map(c =>
+        c.id === convId
+          ? { ...c, messages: c.messages.filter(m => m.id !== assistantMsgId) }
+          : c
+      )
+    );
+
+    // Re-send the user message
+    this.sendMessage(userMsg.content);
   }
 
   fetchQuickPrompts(): void {

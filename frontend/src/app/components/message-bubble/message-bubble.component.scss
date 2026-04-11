@@ -142,6 +142,69 @@
   }
 }
 
+.error-container {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: rgba(255, 71, 87, 0.1);
+  border: 1px solid rgba(255, 71, 87, 0.2);
+  border-radius: 12px;
+  padding: 14px;
+  margin: 4px 0;
+
+  .error-content {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+
+    .error-icon {
+      font-size: 1.1rem;
+      line-height: 1;
+      margin-top: 2px;
+    }
+
+    .error-text {
+      color: #ff4757;
+      font-size: 0.9rem;
+      font-weight: 500;
+    }
+  }
+
+  .retry-btn {
+    align-self: flex-start;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 6px;
+    color: #fff;
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    font-family: inherit;
+
+    svg {
+      transition: transform 0.3s ease;
+    }
+
+    &:hover {
+      background: rgba(255, 255, 255, 0.2);
+      border-color: rgba(255, 255, 255, 0.3);
+      
+      svg {
+        transform: rotate(180deg);
+      }
+    }
+
+    &:active {
+      transform: scale(0.98);
+    }
+  }
+}
+
 .message-sources {
   margin-top: 1rem;
   padding-top: 0.75rem;

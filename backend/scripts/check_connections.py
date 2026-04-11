@@ -1,5 +1,16 @@
 import os
 import sys
+
+# Add backend to path for imports
+BACKEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if BACKEND_DIR not in sys.path:
+    sys.path.insert(0, BACKEND_DIR)
+
+# ── Python 3.14 / sniffio compatibility ───────────────────────────────
+import sniffio_compat
+sniffio_compat.apply()
+# ──────────────────────────────────────────────────────────────────────
+
 import httpx
 from dotenv import load_dotenv
 from llama_index.graph_stores.neo4j import Neo4jGraphStore
@@ -59,8 +70,8 @@ def check_neo4j():
 def check_storage():
     """Check local storage directories."""
     print("\n--- Checking Local Storage ---")
-    BACKEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    storage_path = os.path.join(BACKEND_DIR, "storage")
+    from config import STORAGE_DIR
+    storage_path = STORAGE_DIR
     subdirs = ["vector", "bm25", "summary", "generated_guardrails", "generated_summaries"]
 
     if os.path.exists(storage_path):

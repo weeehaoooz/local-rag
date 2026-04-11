@@ -70,7 +70,11 @@
         </div>
       } @else {
         @for (msg of messages(); track msg.id) {
-          <app-message-bubble [message]="msg" (promptClick)="applyPrompt($event)" />
+          <app-message-bubble
+            [message]="msg"
+            (promptClick)="applyPrompt($event)"
+            (retryClick)="handleRetry($event)"
+          />
         }
       }
 

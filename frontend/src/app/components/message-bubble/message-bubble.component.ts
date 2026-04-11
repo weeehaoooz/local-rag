@@ -13,4 +13,5 @@ import { DatePipe, DecimalPipe } from '@angular/common';
 export class MessageBubbleComponent {
   readonly message = input.required<ChatMessage>();
   readonly promptClick = output<string>();
+  readonly retryClick = output<string>();
 }

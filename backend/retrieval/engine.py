@@ -1,3 +1,6 @@
+import sniffio_compat
+sniffio_compat.apply()
+
 import nest_asyncio
 # Apply nest_asyncio to handle nested event loops in llama-index
 nest_asyncio.apply()
@@ -197,9 +200,27 @@ class HybridEngine:
         plan = await self.orchestrator.plan_tools(query)
         tools = plan.tools
         query_type = plan.fallback_query_type
-        print(f"  [Orchestrator] Tools: {tools} | Fallback: {query_type.value} | Rationale: {plan.rationale}")
+        print(f"  [Orchestrator] Tools: {tools} | Generic: {plan.is_generic} | Fallback: {query_type.value} | Rationale: {plan.rationale}")
 
-        _, entity_hints = self.router.classify_query(query)
+        if plan.is_generic and not tools:
+            print(f"  [Engine] No tools selected for generic query. Returning empty context.")
+            return {
+                "graph_context": [],
+                "vector_context": [],
+                "summary_context": [],
+                "community_context": [],
+                "sources": [],
+                "query_type": query_type,
+                "tools_used": [],
+                "orchestrator_rationale": plan.rationale,
+            }
+        
+        # If generic, skip specific keyword classification but still run tools like community_search
+        entity_hints = []
+        if not plan.is_generic:
+            _, entity_hints = self.router.classify_query(query)
+        else:
+            print(f"  [Engine] Generic query detected. Skipping keyword classification but running global tools if selected.")
 
         all_sources = []
 
@@ -215,63 +236,96 @@ class HybridEngine:
         # 1. Semantic (Vector) & Lexical (BM25)
         vector_candidates = []
         if self.vector_index and "vector_search" in tools:
-            # HyDE for local semantic search
-            vector_query = await self.transformer.generate_hyde_document(query)
-            nodes = await self.vector_index.as_retriever(similarity_top_k=5).aretrieve(vector_query)
-            vector_candidates = _to_dicts(nodes)
-            all_sources.extend(self.formatter.extract_sources(nodes))
+            try:
+                # HyDE for local semantic search
+                print(f"  [Engine] Running vector_search for query: {query[:50]}...")
+                vector_query = await self.transformer.generate_hyde_document(query)
+                nodes = await self.vector_index.as_retriever(similarity_top_k=5).aretrieve(vector_query)
+                vector_candidates = _to_dicts(nodes)
+                all_sources.extend(self.formatter.extract_sources(nodes))
+                print(f"  [Engine] Found {len(vector_candidates)} vector candidates.")
+            except Exception as e:
+                print(f"  [Engine] vector_search failed: {e}")
 
         bm25_candidates = []
         if self.bm25_retriever and "vector_search" in tools:
-            # BM25Retriever doesn't have aretrieve — run in executor to avoid blocking
-            loop = asyncio.get_event_loop()
-            nodes = await loop.run_in_executor(None, self.bm25_retriever.retrieve, query)
-            bm25_candidates = _to_dicts(nodes)
-            all_sources.extend(self.formatter.extract_sources(nodes))
+            try:
+                # BM25Retriever doesn't have aretrieve — run in executor to avoid blocking
+                print(f"  [Engine] Running bm25_search...")
+                loop = asyncio.get_event_loop()
+                nodes = await loop.run_in_executor(None, self.bm25_retriever.retrieve, query)
+                bm25_candidates = _to_dicts(nodes)
+                all_sources.extend(self.formatter.extract_sources(nodes))
+                print(f"  [Engine] Found {len(bm25_candidates)} BM25 candidates.")
+            except Exception as e:
+                print(f"  [Engine] bm25_search failed: {e}")
 
         # 2. Knowledge Graph — use aretrieve() to avoid nested asyncio.run()
         graph_candidates = []
         expanded_entities = []
         if "graph_search" in tools:
-            kg_retriever = self.kg_index.as_retriever(include_text=True, similarity_top_k=5)
-            nodes = await kg_retriever.aretrieve(query)
-            graph_candidates = _to_dicts(nodes)
-            all_sources.extend(self.formatter.extract_sources(nodes))
+            try:
+                print(f"  [Engine] Running graph_search...")
+                kg_retriever = self.kg_index.as_retriever(include_text=True, similarity_top_k=5)
+                nodes = await kg_retriever.aretrieve(query)
+                graph_candidates = _to_dicts(nodes)
+                all_sources.extend(self.formatter.extract_sources(nodes))
 
-            seeds = entity_hints + [n['metadata'].get('name') for n in graph_candidates if n['metadata'].get('name')]
-            if seeds:
-                expanded_entities = self.graph_service.expand_graph_context(list(set(seeds)), max_hops=1)
+                seeds = entity_hints + [n['metadata'].get('name') for n in graph_candidates if n['metadata'].get('name')]
+                if seeds:
+                    expanded_entities = self.graph_service.expand_graph_context(list(set(seeds)), max_hops=1)
+                print(f"  [Engine] Found {len(graph_candidates)} graph candidates.")
+            except Exception as e:
+                print(f"  [Engine] graph_search failed: {e}")
 
         # 3. Fusion & Hybrid Traversal
         fused_context = []
         if "vector_search" in tools or "graph_search" in tools:
-            fusion_input = [l for l in [vector_candidates, bm25_candidates, graph_candidates] if l]
-            if fusion_input:
-                fused_results = self.fusion_service.reciprocal_rank_fusion(fusion_input)
-                top_fused = fused_results[:5]
-                fused_context = [(c["text"], c["source"]) for c in top_fused]
+            try:
+                fusion_input = [l for l in [vector_candidates, bm25_candidates, graph_candidates] if l]
+                if fusion_input:
+                    fused_results = self.fusion_service.reciprocal_rank_fusion(fusion_input)
+                    top_fused = fused_results[:5]
+                    fused_context = [(c["text"], c["source"]) for c in top_fused]
 
-                traversal = self.graph_service.hybrid_graph_traversal(top_fused)
-                expanded_entities.extend(traversal.get("entities", []))
+                    traversal = self.graph_service.hybrid_graph_traversal(top_fused)
+                    expanded_entities.extend(traversal.get("entities", []))
+                    print(f"  [Engine] Rank fusion complete. {len(fused_context)} results.")
+            except Exception as e:
+                print(f"  [Engine] Fusion/Traversal failed: {e}")
 
         # 4. Global Context (Summaries & Communities)
         summary_context = []
         if self.summary_index and "summary_search" in tools:
-            nodes = await self.summary_index.as_retriever().aretrieve(query)
-            summary_context = [(n.get_content(), "Summary") for n in nodes[:2]]
-            all_sources.extend(self.formatter.extract_sources(nodes))
+            try:
+                print(f"  [Engine] Running summary_search...")
+                nodes = await self.summary_index.as_retriever().aretrieve(query)
+                summary_context = [(n.get_content(), "Summary") for n in nodes[:2]]
+                all_sources.extend(self.formatter.extract_sources(nodes))
+                print(f"  [Engine] Found {len(summary_context)} summary candidates.")
+            except Exception as e:
+                print(f"  [Engine] summary_search failed: {e}")
 
         community_context = []
         if self.community_summarizer and "community_search" in tools:
-            communities = self.community_summarizer.get_relevant_summaries(query, top_k=3)
-            for c in communities:
-                community_context.append((c.get("summary", ""), f"Community {c.get('community_id')}"))
+            try:
+                print(f"  [Engine] Running community_search...")
+                communities = self.community_summarizer.get_relevant_summaries(query, top_k=3)
+                for c in communities:
+                    community_context.append((c.get("summary", ""), f"Community {c.get('community_id')}"))
+                print(f"  [Engine] Found {len(community_context)} community summaries.")
+            except Exception as e:
+                print(f"  [Engine] community_search failed: {e}")
 
         # 5. Entity Summarization
-        summarized_graph = self.graph_service.summarize_entity_context(
-            [(c["text"], c["source"]) for c in graph_candidates],
-            expanded_entities
-        )
+        summarized_graph = []
+        try:
+            summarized_graph = self.graph_service.summarize_entity_context(
+                [(c["text"], c["source"]) for c in graph_candidates],
+                expanded_entities
+            )
+        except Exception as e:
+            print(f"  [Engine] graph summarization failed: {e}")
 
         # 6. Web & ArXiv Context
         if "web_search" in tools and self.web_searcher:

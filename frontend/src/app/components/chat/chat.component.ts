@@ -94,6 +94,10 @@ export class ChatComponent implements OnInit {
     }
   }
 
+  handleRetry(msgId: string): void {
+    this.chatService.retryMessage(msgId);
+  }
+
   private scrollToBottom(): void {
     setTimeout(() => {
       const el = this.messagesContainer()?.nativeElement;

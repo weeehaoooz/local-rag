@@ -36,6 +36,7 @@ export interface ChatMessage {
   isStreaming?: boolean;
   processingState?: string;
   liveTokenCount?: number;
+  error?: boolean;
 }
 
 export interface Conversation {

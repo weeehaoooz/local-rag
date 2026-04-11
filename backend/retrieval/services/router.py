@@ -10,6 +10,7 @@ class QueryType(str, Enum):
     LOCAL = "LOCAL"    # Specific entity/fact queries
     GLOBAL = "GLOBAL"  # Thematic/summary queries across documents
     HYBRID = "HYBRID"  # Specific topic needing broader context
+    GENERIC = "GENERIC" # Non-searchable/conversational queries
     UNKNOWN = "UNKNOWN"
 
 class RouterService:
